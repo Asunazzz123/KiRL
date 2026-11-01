@@ -1,13 +1,18 @@
+# distributed/context.py
 """Distributed context for multi-GPU coordination."""
 from __future__ import annotations
 
 import os
+import logging
 import torch
 import torch.distributed as dist
+
 
 from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
+from utils.logging import Log
+logger = Log.get_logger(__name__)
 
 
 @dataclass
@@ -22,7 +27,7 @@ class DistributedContext:
     def from_torchrun(cls) -> "DistributedContext":
         # 从环境变量中获得 LOCAL_RANK
         local_rank = int(os.environ["LOCAL_RANK"])
-        if torch.cuda.is_available(): 
+        if torch.cuda.is_available():
             if not dist.is_nccl_available():
                 raise RuntimeError(
                     "Current PyTorch environment does not support NCCL"
@@ -34,8 +39,24 @@ class DistributedContext:
         else:
             device = torch.device("cpu")
             backend = "gloo"
+
+        logger.info(
+            "Initializing process group: "
+            "rank=%s local_rank=%s world_size=%s backend=%s device=%s",
+            os.environ.get("RANK","?"),
+            local_rank,
+            os.environ.get("WORLD_SIZE","?"),
+            backend,
+            device
+        )
         # 从环境变量中初始化进程组
         dist.init_process_group(backend=backend,init_method="env://")
+
+        logger.info(
+            "Process group initialized: rank=%s world_size=%s",
+            dist.get_rank(),
+            dist.get_world_size(),
+        )
 
         return cls(
             rank = dist.get_rank(),
@@ -112,7 +133,7 @@ class DistributedContext:
 
 
 
-    
+
 
 
 
