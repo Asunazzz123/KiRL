@@ -1,28 +1,54 @@
 """Distributed context for multi-GPU coordination."""
-import torch
+from __future__ import annotations
 
+import os
+import torch
+import torch.distributed as dist
+
+from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
+
+
+@dataclass
 class DistributedContext:
     rank: int
     local_rank: int
     world_size: int
     device: torch.device
 
+
     @classmethod
-    def from_torchrun(cls) -> DistributedContext:
-        return DistributedContext(
-            rank = cls.rank,
-            local_rank = cls.local_rank,
-            world_size = cls.world_size,
-            device = cls.device
+    def from_torchrun(cls) -> "DistributedContext":
+        # 从环境变量中获得 LOCAL_RANK
+        local_rank = int(os.environ["LOCAL_RANK"])
+        if torch.cuda.is_available(): 
+            if not dist.is_nccl_available():
+                raise RuntimeError(
+                    "Current PyTorch environment does not support NCCL"
+                )
+            # 支持CUDA的时候使用nccl通信
+            device = torch.device("cuda",local_rank)
+            torch.cuda.set_device(device=device)
+            backend = "nccl"
+        else:
+            device = torch.device("cpu")
+            backend = "gloo"
+        # 从环境变量中初始化进程组
+        dist.init_process_group(backend=backend,init_method="env://")
+
+        return cls(
+            rank = dist.get_rank(),
+            local_rank = local_rank,
+            world_size = dist.get_world_size(),
+            device = device
         )
 
     def barrier(self):
         """阻塞所有的分布式进程，直到同步所有rank"""
-        torch.distributed.barrier()
+        dist.barrier()
 
-    def all_reduce(self, tensor: torch.Tensor, op: torch.distributed.ReduceOp) -> torch.Tensor:
+    def all_reduce(self, tensor: torch.Tensor, op: dist.ReduceOp = dist.ReduceOp.SUM) -> torch.Tensor:
         """
         根据reduce op 对 tensor 在所有rank 上求和
         Args:
@@ -31,13 +57,13 @@ class DistributedContext:
         Returns:
             tensor: 输出求和后的向量
         """
-        torch.distributed.all_reduce(tensor,op)
+        dist.all_reduce(tensor,op)
         return tensor
 
     def all_gather(self, tensor: torch.Tensor) -> list[torch.Tensor]:
         """收集所有rank的tensor"""
         gathered = [torch.zeros_like(tensor) for _ in range(self.world_size)] # 按照tensor 形状创建0 tensor
-        torch.distributed.all_gather(gathered,tensor) # 将 tensor合并后分发给每一个rank
+        dist.all_gather(gathered,tensor) # 将 tensor合并后分发给每一个rank
         return gathered
 
     def broadcast(self,tensor: torch.Tensor, src: int) -> torch.Tensor:
@@ -49,7 +75,7 @@ class DistributedContext:
         Returns:
             tensor: 广播后的tensor
         """
-        torch.distributed.broadcast(tensor,src)
+        dist.broadcast(tensor,src)
         return tensor
 
     T = TypeVar("T")
@@ -74,7 +100,7 @@ class DistributedContext:
         hash_tensor = torch.tensor([int(value_hash[:15], 16)],dtype=torch.int64, device=self.device)
 
         all_hashes = [torch.zeros_like(hash_tensor) for _ in range(self.world_size)]
-        torch.distributed.all_gather(all_hashes, hash_tensor)
+        dist.all_gather(all_hashes, hash_tensor)
 
         first_hash = all_hashes[0].item()
         for rank, h in enumerate(all_hashes):
@@ -85,6 +111,8 @@ class DistributedContext:
                 )
 
 
+
+    
 
 
 

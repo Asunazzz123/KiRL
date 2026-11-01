@@ -1,10 +1,11 @@
 
-def set_deterministic_training(seed: int, rank: int = 0):
+def set_deterministic_training(seed: int, rank: int = 0, is_independent:bool = True):
+    # TODO: 在训练脚本中写入随机种子
     import random
     import numpy as np
     import torch
     import os
-    rseed = seed+rank
+    rseed = seed+rank if is_independent else seed
     # Python 随机种子
     random.seed(rseed)
     # Numpy 随机种子
