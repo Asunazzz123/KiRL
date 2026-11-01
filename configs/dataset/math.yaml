@@ -1,0 +1,14 @@
+# MATH Dataset Configuration
+
+name: math
+
+# Data paths
+train_path: "data/math/train.jsonl"
+eval_path: "data/math/test.jsonl"
+
+# Dataset parameters
+difficulty_filter: null  # null | 1-5
+subject_filter: null  # null | "algebra" | "geometry" | ...
+max_samples: null
+shuffle: true
+seed: 42

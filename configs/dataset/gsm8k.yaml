@@ -1,0 +1,13 @@
+# GSM8K Dataset Configuration
+
+name: gsm8k
+
+# Data paths
+train_path: "data/gsm8k/train.jsonl"
+eval_path: "data/gsm8k/test.jsonl"
+prompt_template_path: "data/gsm8k/prompt_template.txt"
+
+# Dataset parameters
+max_samples: null  # null for all samples
+shuffle: true
+seed: 42

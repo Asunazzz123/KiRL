@@ -1,0 +1,13 @@
+# PPO Algorithm Configuration
+
+name: ppo
+
+# PPO-specific hyperparameters
+clip_ratio: 0.2  # PPO clipping parameter
+gae_lambda: 0.95  # GAE lambda for advantage estimation
+gamma: 0.99  # Discount factor
+value_loss_coef: 0.5  # Value loss coefficient
+entropy_coef: 0.01  # Entropy bonus coefficient
+
+# Advantage estimation
+advantage_normalization: "global"  # "global" | "batch" | "none"

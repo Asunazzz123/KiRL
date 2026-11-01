@@ -1,0 +1,15 @@
+# GRPO Algorithm Configuration
+
+name: grpo
+
+# GRPO-specific hyperparameters
+beta: 0.1  # Temperature for advantage computation
+temperature: 1.0  # Sampling temperature during rollout
+group_size: 4  # Number of responses per prompt for group normalization
+
+# Loss configuration
+cliprange: 0.2  # Optional: clip ratio for importance sampling
+loss_normalization: "token"  # "token" | "sequence" | "none"
+
+# Advantage estimation
+advantage_normalization: "group"  # "group" | "global" | "none"

@@ -1,0 +1,23 @@
+# FSDP Engine Configuration
+
+name: fsdp
+
+# Model configuration
+model_id: "meta-llama/Llama-2-7b-hf"
+compute_dtype: "bfloat16"  # "bfloat16" | "float32" | "float16"
+param_dtype: "float32"
+
+# FSDP settings
+sharding_strategy: "FULL_SHARD"  # "FULL_SHARD" | "SHARD_GRAD_OP" | "NO_SHARD"
+cpu_offload: false
+gradient_checkpointing: false
+
+# Optimization
+learning_rate: 1.0e-5
+weight_decay: 0.0
+max_grad_norm: 1.0
+optimizer: "adamw"  # "adamw" | "sgd"
+
+# Learning rate schedule
+lr_scheduler: "cosine"  # "cosine" | "linear" | "constant"
+warmup_steps: 100

@@ -1,0 +1,43 @@
+# TinyEngine Training Configuration
+
+defaults:
+  - algo: grpo
+  - dataset: gsm8k
+  - engine: fsdp
+
+# Training parameters
+num_steps: 1000
+batch_size: 8
+gradient_accumulation_steps: 4
+prompts_per_batch: 32
+
+# Generation configuration
+generation:
+  max_new_tokens: 256
+  temperature: 1.0
+  top_p: 0.9
+  do_sample: true
+
+# Reward configuration
+reward:
+  type: "gsm8k_reward"  # "gsm8k_reward" | "math_reward" | "external_model"
+  format_weight: 0.1  # Weight for format correctness
+
+# Logging and evaluation
+log_interval: 10
+eval_interval: 100
+eval_examples: 500
+
+# Checkpointing
+output_dir: "./outputs"
+save_interval: 500
+best_checkpoint_dir: "./checkpoints/best"
+
+# Reproducibility
+seed: 42
+deterministic: true
+
+# Distributed training (set by torchrun)
+# world_size: auto
+# rank: auto
+# local_rank: auto

@@ -1,0 +1,22 @@
+# DDP Engine Configuration
+
+name: ddp
+
+# Model configuration
+model_id: "meta-llama/Llama-2-7b-hf"
+compute_dtype: "bfloat16"
+param_dtype: "float32"
+
+# DDP settings
+gradient_checkpointing: false
+find_unused_parameters: false
+
+# Optimization
+learning_rate: 1.0e-5
+weight_decay: 0.0
+max_grad_norm: 1.0
+optimizer: "adamw"
+
+# Learning rate schedule
+lr_scheduler: "cosine"
+warmup_steps: 100
