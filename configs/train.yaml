@@ -4,6 +4,7 @@ defaults:
   - algo: grpo
   - dataset: gsm8k
   - engine: fsdp
+  - profiler: default
 
 # Training parameters
 num_steps: 1000

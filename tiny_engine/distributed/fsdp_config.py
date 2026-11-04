@@ -15,8 +15,8 @@ class FSDPConfig:
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
     gradient_checkpointing: bool = False
-    mode = str = Literal["FSDP" | "FSDP2"]
-    cpu_offload = bool = False
+    mode: Literal["FSDP","FSDP2"] = "FSDP"
+    cpu_offload: bool = False
     # FSDP strategy
     sharding_strategy : Literal[
         "FULL_SHARD",
@@ -75,7 +75,7 @@ class FSDPConfig:
                 "NO_SHARD"
             ):
                 raise ValueError(
-                    "Unsupported Sharding Strategy: f{self.sharding_stratergy!r}"
+                    "Unsupported sharding strategy: f{self.sharding_stratergy!r}"
                 )
         else:
             if self.sharding_strategy is not None:

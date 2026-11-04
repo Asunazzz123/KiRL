@@ -75,6 +75,12 @@ python examples/train_grpo_gsm8k.py algo=ppo dataset=math
 
 ## Architecture Highlights
 
+### Profiling and reports
+
+The optional profiler provides global/rank sampling, PyTorch training traces, an injected vLLM client adapter, bounded JSONL output, and offline JSON reports. 
+
+This example runs a small CPU training workload; it does not validate distributed FSDP or vLLM inference.
+
 ### Algorithm Module
 Algorithms are pluggable through a registry pattern:
 ```python
@@ -83,7 +89,7 @@ class GRPOAlgorithm(BaseAlgorithm):
     def compute_advantages(self, rollout_data, config):
         # GRPO-specific advantage estimation
         ...
-    
+
     def compute_loss(self, advantages, log_probs, old_log_probs, config):
         # GRPO policy gradient loss
         ...
@@ -97,7 +103,7 @@ class GSM8KDataset(BaseDataset):
     def load_raw_data(self, split):
         # Load GSM8K from disk or HuggingFace
         ...
-    
+
     def parse_sample(self, raw_sample):
         # Parse into model input format
         ...

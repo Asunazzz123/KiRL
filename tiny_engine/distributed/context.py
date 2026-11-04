@@ -118,7 +118,7 @@ class DistributedContext:
 
         value_bytes = pickle.dumps(value)
         value_hash = hashlib.sha256(value_bytes).hexdigest()
-        hash_tensor = torch.tensor([int(value_hash[:15], 16)],dtype=torch.int64, device=self.device)
+        hash_tensor = torch.tensor(list(value_hash),dtype=torch.uint8, device=self.device)
 
         all_hashes = [torch.zeros_like(hash_tensor) for _ in range(self.world_size)]
         dist.all_gather(all_hashes, hash_tensor)

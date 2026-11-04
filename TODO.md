@@ -48,10 +48,10 @@
       local_rank: int
       world_size: int
       device: torch.device
-      
+
       @classmethod
       def from_torchrun(cls) -> DistributedContext
-      
+
       def barrier(self)
       def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor
       def all_gather(self, tensor: torch.Tensor) -> list[torch.Tensor]
@@ -61,138 +61,160 @@
   ```
 
 - [ ] Add determinism utilities
-  - Set CUDA seeds
-  - Set `CUBLAS_WORKSPACE_CONFIG=:4096:8`
-  - Set `PYTHONHASHSEED`
+  - Separate identical model initialization seeds from rank-specific training/sampling seeds
+  - Establish CUDA determinism settings before the relevant runtime is initialized
+  - Configure Python hash seeding before interpreter startup when required
+
+- [ ] Define process-group ownership, initialization validation, timeout policy, and cleanup on exit
+- [ ] Distinguish rank-0-only local work from operations requiring collective participation
 
 **Testing**:
 - [ ] Test with `torchrun --nproc_per_node=2` on single node
 - [ ] Verify all_reduce/all_gather correctness
 - [ ] Test rank-0-only operations (`root_call`)
 
-### 1.2 FSDP Configuration (Priority: HIGH)
+### 1.2 FSDP Configuration and Backend (Priority: HIGH)
 
-**File**: `tiny_engine/distributed/fsdp_config.py`
+**Goal**: Establish a dedicated FSDP backend that exposes a small, stable interface to TinyEngine. Keep backend-specific behavior out of the training orchestration code.
 
-- [ ] Implement `FSDPConfig` dataclass
-  ```python
-  @dataclass
-  class FSDPConfig:
-      compute_dtype: torch.dtype = torch.bfloat16
-      param_dtype: torch.dtype = torch.float32
-      learning_rate: float = 1e-5
-      weight_decay: float = 0.0
-      max_grad_norm: float = 1.0
-      gradient_checkpointing: bool = False
-      sharding_strategy: str = "FULL_SHARD"  # FULL_SHARD | SHARD_GRAD_OP | NO_SHARD
-      cpu_offload: bool = False
-  ```
+**Planned responsibility boundaries** (new paths are planned, not yet implemented):
 
-- [ ] Add FSDP wrapping utilities
-  - Auto-wrap policy for transformer blocks
-  - Mixed precision policy
+| Owner | Responsibility |
+| --- | --- |
+| `distributed/context.py` | Process identity, device binding, process-group lifecycle, and shared communication helpers |
+| `distributed/fsdp_config.py` | Configuration values, defaults, and validation; no model construction or distributed initialization |
+| `distributed/fsdp_backend.py` (planned) | FSDP1/FSDP2 selection, wrapping, precision policies, gradient synchronization, global clipping, and backend-specific state access |
+| `engine/tiny_engine.py` | Model/optimizer ownership and orchestration of initialization, forward, backward, update, and evaluation |
+| `engine/checkpoint.py` | Checkpoint contents, persistence, metadata, retention, and recovery, using the backend's state interface |
+| `pipeline/` and training entry scripts | Data flow, algorithm loss, training schedule, logging setup, and process cleanup |
+
+Start with one backend module. Separate FSDP1/FSDP2 implementations later only if their complexity warrants it. The backend must not depend on TinyEngine or on a particular RL algorithm.
+
+#### 1.2.1 Configuration Contract
+
+- [ ] Complete the dataclass fields and initialization-time validation
+- [ ] Distinguish backend selection from sharding behavior
+  - FSDP1: explicitly supported sharding strategies
+  - FSDP2: parameter resharding behavior and mesh requirements
+  - Reject incompatible fields rather than silently ignoring user input
+- [ ] Define model storage dtype, compute dtype, gradient reduction dtype, and relevant buffer dtype semantics
+- [ ] Define ownership of optimizer settings separately from FSDP settings, even if initially stored in one configuration object
+- [ ] Convert YAML values into validated configuration values at the configuration boundary
+- [ ] Define supported PyTorch versions and detect selected-backend capabilities before model allocation
+- [ ] Keep importing configuration independent of optional backend APIs
+- [ ] Reject requested features that are not implemented; a configuration flag alone does not establish support
+
+#### 1.2.2 Model Preparation and Wrapping
+
+- [ ] Define the backend preparation contract: input model, configuration, distributed context, and selected block types; output the prepared model
+- [ ] Document whether preparation mutates or replaces the model and require callers to use the returned model
+- [ ] Validate device/backend compatibility before entering distributed model preparation
+- [ ] Establish a minimal single-node topology; defer hybrid and multi-dimensional meshes
+- [ ] Select Transformer blocks explicitly and report when no supported blocks are found
+- [ ] Preserve shared/tied parameter ownership when selecting wrapping boundaries
+- [ ] Support FSDP1 wrapping and FSDP2 child-before-parent sharding through the same preparation boundary
+- [ ] Guarantee consistent initial parameters and buffers across ranks
+  - Separate identical model initialization from rank-specific training randomness
+  - Define consistency requirements for random initialization and pretrained loading
+- [ ] Define mixed precision and optional gradient checkpointing preparation order
+- [ ] Require optimizer construction after model preparation
+- [ ] Record the effective backend, precision, wrapping targets, and topology in startup diagnostics
+
+#### 1.2.3 Runtime Services Exposed to TinyEngine
+
+- [ ] Expose gradient synchronization control for accumulation, with a documented all-rank participation contract
+- [ ] Expose global gradient norm/clipping behavior appropriate to each backend
+- [ ] Define distributed-safe overflow detection and scaling requirements for FP16 training
+- [ ] Define how train/eval transitions preserve valid sharding state
+- [ ] Expose backend-aware model and optimizer state access for checkpoint save/load
+- [ ] Document which operations are collective and must be called in the same order on all participating ranks
+- [ ] Keep algorithm loss, data sampling, checkpoint paths, and checkpoint retention outside this module
+
+#### 1.2.4 Baseline Scope and Acceptance
+
+- [ ] Select one backend as the first acceptance target; validate the other independently before advertising dual-backend support
+- [ ] Start with a small dense model, a single node, and GPU-resident model/optimizer state
+- [ ] Validate FP32 first, then BF16 where supported; accept FP16 only with verified scaling and overflow handling
+- [ ] Verify configuration rejection and supported block selection without requiring a GPU
+- [ ] On two GPUs, verify successful preparation, consistent initial weights, and a complete forward/backward/update
+- [ ] Compare loss, global gradient norm, and one-step parameter updates with a single-device reference using the same global batch and declared tolerances
+- [ ] Keep static checks, CPU tests, and real CUDA/NCCL acceptance results distinct
+
+**Deferred extensions**: CPU/activation offload, meta-device loading, hybrid sharding, prefetch tuning, LoRA, quantization, sequence parallelism, and external rollout weight synchronization. Add separate acceptance tasks before enabling any of these features.
 
 ### 1.3 TinyEngine Core (Priority: HIGH)
 
 **File**: `tiny_engine/engine/tiny_engine.py`
 
-- [ ] Implement model initialization
-  ```python
-  def _init_model(
-      self, 
-      model_factory: Callable, 
-      fsdp_config: FSDPConfig
-  ) -> nn.Module:
-      # Load model
-      # Apply FSDP wrapping
-      # Enable gradient checkpointing if requested
-      ...
-  ```
+**Dependency**: Use the backend contract from 1.2. TinyEngine owns training state and invokes backend services; it does not duplicate FSDP wrapping, collective clipping, or state conversion logic.
 
-- [ ] Implement forward/backward
-  ```python
-  def forward(
-      self, 
-      input_ids: torch.Tensor,
-      attention_mask: torch.Tensor,
-      labels: Optional[torch.Tensor] = None
-  ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-      # Forward pass with autocast
-      # Return (logits, loss) if labels provided
-      ...
-  
-  def backward(self, loss: torch.Tensor):
-      # Backward with gradient accumulation handling
-      ...
-  ```
-
-- [ ] Implement optimizer step
-  ```python
-  def step(self):
-      # Unscale gradients (if using GradScaler)
-      # Clip gradients
-      # Optimizer step
-      # Zero grad
-      # LR scheduler step
-      ...
-  ```
-
-- [ ] Implement generation
-  ```python
-  def generate(
-      self,
-      input_ids: torch.Tensor,
-      attention_mask: torch.Tensor,
-      generation_config: GenerationConfig
-  ) -> RolloutResult:
-      # Use model.generate() for sampling
-      # Return RolloutResult(response_ids, response_mask, log_probs)
-      ...
-  ```
+- [ ] Define model initialization and ownership
+  - Load the model, apply requested model preparation, and delegate distributed wrapping
+  - Construct optimizer and optional scheduler only after backend preparation
+  - Keep model initialization separate from algorithm and dataset construction
+- [ ] Define forward/backward contracts
+  - Specify accepted batch fields and returned outputs
+  - Preserve the computation graph required by the algorithm loss
+  - Keep precision behavior consistent with the backend policy
+  - Define who normalizes loss across ranks and micro-batches; avoid double normalization
+- [ ] Implement gradient accumulation orchestration
+  - Define micro-step versus optimizer-step counters
+  - Handle incomplete accumulation windows and unequal effective token counts
+  - Require compatible collective schedules across ranks
+  - Establish correctness with normal synchronization before adding deferred-sync optimization
+- [ ] Implement the optimizer update lifecycle
+  - Undo scaling before clipping when FP16 scaling is enabled
+  - Delegate global clipping to the backend
+  - Ensure all ranks agree whether an update proceeds or is skipped for non-finite gradients
+  - Define gradient clearing and scheduler advancement relative to successful updates
+  - Return update status, gradient norm, and learning rate for logging
+- [ ] Define train/eval transitions and forward-only execution
+  - Separate module training mode from gradient recording
+  - Restore the previous mode and valid backend state after evaluation
+- [ ] Define a basic generation contract
+  - Specify response token IDs, masks, and the meaning of returned log probabilities
+  - Keep gradient-free rollout outputs distinct from differentiable training log probabilities
+  - Coordinate generation completion across ranks when forward passes involve collectives
+  - Validate compatibility with the selected FSDP backend before using model generation APIs
+  - Defer external inference-engine integration to a separate generation/weight-sync boundary
 
 **Testing**:
-- [ ] Single-GPU forward/backward correctness
-- [ ] Multi-GPU gradient synchronization (compare with DDP baseline)
-- [ ] Generation output determinism (same seed → same output)
-- [ ] Memory profiling (gradient checkpointing effect)
+- [ ] Single-device forward/backward/update correctness on a small deterministic model
+- [ ] Two-GPU updates match a single-device or DDP reference for the same global batch within declared tolerances
+- [ ] Accumulated micro-batches match the unsplit batch, including unequal effective token counts
+- [ ] Non-finite gradients produce consistent skip/fail behavior and scheduler state on all ranks
+- [ ] Evaluation does not accumulate gradients and training resumes correctly afterward
+- [ ] Generation with different per-rank EOS times completes without collective hangs
+- [ ] Record memory effects of gradient checkpointing on actual target hardware
 
 ### 1.4 Checkpoint Management (Priority: MEDIUM)
 
 **File**: `tiny_engine/engine/checkpoint.py`
 
-- [ ] Implement save/load for FSDP
-  ```python
-  def save_checkpoint(
-      engine: TinyEngine,
-      path: Path,
-      metadata: dict,
-      save_optimizer: bool = True
-  ):
-      # Use FSDP state_dict with full_state_dict on rank 0
-      # Save metadata separately
-      ...
-  
-  def load_checkpoint(
-      engine: TinyEngine,
-      path: Path
-  ) -> dict:
-      # Load with FSDP-aware loading
-      # Return metadata
-      ...
-  ```
-
-- [ ] Implement best checkpoint tracker
-  ```python
-  class BestCheckpointTracker:
-      def consider(self, step: int, metric: float, metadata: dict):
-          # Save if metric improves
-          ...
-  ```
+- [ ] Separate resumable training checkpoints from model-only export
+- [ ] Define checkpoint contents and ownership
+  - Model and optimizer state through the backend interface
+  - Scheduler, scaler, successful update count, and accumulation position where applicable
+  - Per-rank RNG state and pipeline-provided data progress for reproducible continuation
+  - Model/configuration metadata and supported topology/version information
+- [ ] Save baseline checkpoints at completed update boundaries; reject unsupported mid-accumulation resume
+- [ ] Define collective participation independently from which ranks write files
+  - All required ranks participate in state collection/restoration
+  - Distinguish full exports from per-rank/distributed checkpoint storage
+- [ ] Define compatibility checks for restore; initially require the validated backend and world size
+- [ ] Publish a checkpoint as complete only after all required state is saved successfully
+- [ ] Preserve the previous valid checkpoint if saving is interrupted
+- [ ] Define model-only loading behavior so stale optimizer state is not mistaken for a valid resume
+- [ ] Track the best checkpoint using an explicit validation metric, direction, and retention policy
 
 **Testing**:
-- [ ] Save → load → verify parameter equivalence
-- [ ] Multi-GPU: rank-0 saves, all ranks load correctly
-- [ ] Optimizer state resumption (verify training continues smoothly)
+- [ ] Save and reload on two GPUs; verify model and optimizer state equivalence
+- [ ] Compare the next update after restore with uninterrupted training on the same next batch
+- [ ] Verify scheduler/scaler, RNG, and data progress recovery when those capabilities are enabled
+- [ ] Reject incomplete checkpoints and unsupported topology/configuration changes clearly
+- [ ] Verify exported model weights load independently of the training engine
+
+**Implementation order**: configuration validation → backend preparation → one-step engine training → mixed precision/global clipping → gradient accumulation → checkpoint recovery → distributed generation. Each stage requires its own acceptance evidence; adding a configuration option does not mark the corresponding runtime task complete.
 
 ---
 
@@ -217,15 +239,15 @@
   ```python
   class BaseAlgorithm(ABC):
       algo: str = "base"
-      
+
       @abstractmethod
       def compute_advantages(
-          self, 
+          self,
           rollout_data: RolloutData,
           config: DictConfig
       ) -> torch.Tensor:
           ...
-      
+
       @abstractmethod
       def compute_loss(
           self,
@@ -241,7 +263,7 @@
 - [ ] Implement algorithm registry
   ```python
   ALGO_REGISTRY: dict[str, type[BaseAlgorithm]] = {}
-  
+
   def register_algorithm(name: str):
       def decorator(cls):
           ALGO_REGISTRY[name] = cls
@@ -305,23 +327,23 @@
   ```python
   class BaseDataset(ABC):
       name: str = "base"
-      
+
       @abstractmethod
       def load_raw_data(self, split: str) -> list[dict]:
           ...
-      
+
       @abstractmethod
       def parse_sample(self, raw_sample: dict) -> dict[str, Any]:
           ...
-      
+
       def collate_fn(self, batch: list[dict]) -> dict[str, torch.Tensor]:
           # Default tokenization + padding
           ...
-      
+
       def get_shard(
-          self, 
-          data: list[dict], 
-          rank: int, 
+          self,
+          data: list[dict],
+          rank: int,
           world_size: int
       ) -> list[dict]:
           # Default: rank-based round-robin
@@ -335,7 +357,7 @@
 - [ ] Implement dataset registry
   ```python
   DATASET_REGISTRY: dict[str, type[BaseDataset]] = {}
-  
+
   def register_dataset(name: str):
       ...
   ```
@@ -382,41 +404,41 @@
   def train_loop(config: DictConfig):
       # 1. Initialize distributed context
       ctx = DistributedContext.from_torchrun()
-      
+
       # 2. Load modules
       algo = ALGO_REGISTRY[config.algo.name](config.algo)
       dataset = DATASET_REGISTRY[config.dataset.name](config.dataset)
       engine = TinyEngine(model_factory, config.engine, ctx)
-      
+
       # 3. Prepare data
       train_data = dataset.load_raw_data("train")
       local_data = dataset.get_shard(train_data, ctx.rank, ctx.world_size)
-      
+
       # 4. Training loop
       for step in range(config.num_steps):
           # Sample batch
           batch = sample_batch(local_data, config.batch_size)
-          
+
           # Generate rollouts
           rollout = engine.generate(batch, config.generation)
-          
+
           # Compute rewards (external reward function)
           rewards = compute_rewards(rollout, batch, config.reward)
-          
+
           # Algorithm: advantages + loss
           rollout_data = RolloutData(rewards, rollout.log_probs, ...)
           advantages = algo.compute_advantages(rollout_data, config.algo)
           loss, metrics = algo.compute_loss(advantages, ...)
-          
+
           # Backward + step
           engine.backward(loss)
           if (step + 1) % config.gradient_accumulation_steps == 0:
               engine.step()
-          
+
           # Logging
           if step % config.log_interval == 0:
               log_metrics(metrics, step)
-          
+
           # Evaluation
           if step % config.eval_interval == 0:
               eval_metrics = evaluate(engine, dataset, algo, config)
@@ -441,17 +463,17 @@
   ) -> dict[str, float]:
       eval_data = dataset.load_raw_data("validation")
       local_data = dataset.get_shard(eval_data, rank, world_size)
-      
+
       all_rewards = []
       for batch in batches(local_data):
           rollout = engine.generate(batch, gen_config)
           rewards = compute_rewards(rollout, batch, config.reward)
           all_rewards.extend(rewards)
-      
+
       # Aggregate across ranks
       total_reward = ctx.all_reduce(torch.tensor(sum(all_rewards)))
       mean_reward = total_reward / len(eval_data)
-      
+
       return {"mean_reward": mean_reward.item()}
   ```
 
@@ -468,8 +490,8 @@
   class RewardFunction(ABC):
       @abstractmethod
       def compute(
-          self, 
-          response: str, 
+          self,
+          response: str,
           ground_truth: Any
       ) -> dict[str, float]:
           # Return {"reward": float, "answer_reward": float, ...}
@@ -500,7 +522,7 @@
     - algo: grpo
     - dataset: gsm8k
     - engine: fsdp
-  
+
   num_steps: 1000
   batch_size: 8
   gradient_accumulation_steps: 4
@@ -521,13 +543,17 @@
 - [ ] Create engine configs
   - `configs/engine/fsdp.yaml`: FSDP settings
   - `configs/engine/ddp.yaml`: DDP settings
+  - Keep backend-specific options consistent with the validated configuration contract in 1.2
+  - Document model storage, compute, and gradient reduction precision independently
+  - Expose only runtime features with completed acceptance checks
 
 ### 5.2 Logging and Metrics (Priority: MEDIUM)
 
 **File**: `tiny_engine/utils/logging.py`
 
 - [ ] Implement metric logger
-  - Console logging (rank 0 only)
+  - Configure logging in each training process entry point; modules only acquire named loggers
+  - Aggregate routine metrics on rank 0; retain rank-tagged startup/error diagnostics from every rank
   - JSON logging (append to `metrics.jsonl`)
   - Optional: WandB integration
 
@@ -557,6 +583,23 @@
 
 ## Phase 6: Testing and Validation
 
+### Profiler implementation status (2026-11-03)
+
+- [x] Add validated global, Torch, and vLLM profiler settings with a plain-mapping entry point
+- [x] Add per-process Probe/NullProbe, rank/step sampling, coarse host timings, and trace windows
+- [x] Add a bounded background JSONL sink with drop/error/drain status
+- [x] Add a PyTorch adapter and an injected synchronous vLLM client adapter
+- [x] Add backend-independent metric/stage/artifact records and offline JSON report generation
+- [x] Add local CPU trace and fake-vLLM contract tests; optional OmegaConf integration is dependency-gated
+- [x] Add a CPU-only runnable smoke example and profiler integration guide
+- [ ] Wire probes into the real training and inference pipeline once those modules exist
+- [ ] Validate actual CUDA/NCCL FSDP traces and actual vLLM metrics/traces on the target software versions
+- [ ] Measure off/basic/sampled/trace overhead on representative training and inference workloads
+- [ ] Add AsyncLLM/HTTP adapters, cross-node artifact collection, and trace-completion verification
+- [ ] Add windowed rate/quantile analysis and additional report renderers when required
+
+Local CPU tests and fake engine calls do not establish GPU correctness, real vLLM compatibility, or a performance overhead budget.
+
 ### 6.1 Unit Tests (Priority: MEDIUM)
 
 **Directory**: `tests/`
@@ -583,6 +626,13 @@
   - Verify loss decreases
   - Check checkpoint save/load
   - Validate multi-GPU equivalence
+
+- [ ] Complete the FSDP acceptance sequence from 1.2–1.4
+  - Validate each advertised backend and precision mode independently
+  - Use identical global batches and documented numerical tolerances for reference comparisons
+  - Verify accumulation, non-finite update handling, and checkpoint continuation
+  - Record hardware, software versions, world size, and actual commands/results
+  - Do not count configuration-only or mocked tests as CUDA/NCCL acceptance
 
 - [ ] Reproduction test: GRPO on GSM8K subset
   - Compare final metrics with verl baseline
@@ -631,39 +681,44 @@
 ## Critical Notes for Implementation
 
 ### Multi-GPU Synchronization Points
-1. **Generation**: All ranks must generate same number of batches (use `ctx.agree()`)
-2. **Loss computation**: Reduce loss across ranks before backward
-3. **Evaluation**: Aggregate metrics with `all_reduce` before logging
-4. **Checkpointing**: Only rank 0 writes, but all ranks must call `save_checkpoint`
+1. **Generation**: Coordinate batch schedules and per-step completion while model execution requires collectives; agreeing on batch counts alone is insufficient.
+2. **Loss computation**: Backpropagate each rank's differentiable local contribution with the intended global normalization. Backend gradient synchronization handles aggregation; metric reduction is a separate operation.
+3. **Evaluation**: Aggregate metric numerators and denominators across ranks, excluding padded/duplicate examples as appropriate.
+4. **Checkpointing**: All ranks required by the state operation participate. File-writing ownership depends on whether the format is full or sharded.
+5. **Updates**: Keep collective order, accumulation boundaries, and update/skip decisions consistent across ranks.
 
 ### Determinism Requirements
-- Set all seeds before model init: `torch.manual_seed(seed + rank)`
-- Use `torch.use_deterministic_algorithms(True)`
-- For generation: seed = `base_seed + rollout_id * 1009 + rank * 104729`
-- Disable dropout during RL training (inference mode for policy)
+- Initialize the same model weights across ranks, or synchronize a common initialized state before training.
+- Treat rank-specific sampling/training randomness separately from model initialization; capture per-rank RNG state for resume.
+- Declare deterministic settings and numerical tolerances for the tested hardware/software configuration.
+- Define the RL policy's dropout behavior explicitly; evaluation mode and disabled gradient recording are separate decisions.
 
 ### Memory Optimization Strategies
 1. **Gradient Checkpointing**: Trade recomputation for memory
-   - Enable for layers with large activations (transformer blocks)
-   - Cost: ~30% slower training, ~50% less memory
+   - Select supported model regions and verify correctness after preparation
+   - Measure the actual throughput/memory trade-off rather than assuming fixed percentages
 2. **Mixed Precision**: Use bfloat16 for forward/backward, fp32 for optimizer
-   - Avoid loss scaling (bfloat16 has better range than fp16)
+   - Validate hardware support and explicitly define parameter/reduction precision
+   - FP16 support additionally requires validated gradient scaling and overflow handling
 3. **Gradient Accumulation**: Reduce memory by processing smaller microbatches
-   - Only sync gradients every N steps
-4. **FSDP CPU Offload**: Move unused parameters to CPU (last resort, very slow)
+   - Preserve the intended global loss weighting and optimizer update frequency
+   - Deferred synchronization is optional and can increase retained gradient memory
+4. **FSDP CPU Offload**: Defer until the GPU-resident baseline passes; validate compatibility with accumulation and measure transfer costs
 
 ### Common Pitfalls to Avoid
-1. **Uneven Batch Sizes**: All ranks must process same batch size, pad if needed
+1. **Uneven Batches**: Keep collective schedules compatible and normalize by actual sample/token counts; exclude artificial padding from loss and metrics
 2. **Hanging on Collectives**: Ensure all ranks call `all_reduce`/`barrier` at same points
 3. **OOM During Generation**: Use smaller generation batch size than training batch size
 4. **KL Divergence Explosion**: Clip PPO ratio or use adaptive KL penalty
 5. **Reward Hacking**: Normalize rewards per-prompt or use advantage normalization
 
 ### Reference Implementations
-- **FSDP Setup**: CS336 `assignment5/training/backends/fsdp_grpo.py`
+- **FSDP Backend Lifecycle**: verl `verl/workers/engine/fsdp/transformer_impl.py`
+- **Wrapping and State Utilities**: verl `verl/utils/fsdp_utils.py`
+- **Mesh and Strategy Selection**: verl `verl/workers/engine/fsdp/utils.py`
 - **GRPO Algorithm**: verl `verl/trainer/ppo/core_algos.py` (GRPO estimator)
-- **Data Sharding**: CS336 `fsdp_grpo.py:69-73` (rank-based sharding)
-- **Checkpoint**: verl `verl/checkpoint_engine/base.py`
+- **Checkpoint**: verl `verl/utils/checkpoint/fsdp_checkpoint_manager.py`
+- Use these as responsibility and correctness references; review version requirements before adapting backend APIs.
 
 ---
 
@@ -678,10 +733,13 @@
 - [ ] **Validation**: Train on 100 GSM8K samples, loss decreases
 
 ### Milestone 2: Multi-GPU Training (Week 3-4)
-- [ ] FSDP integration
+- [ ] Dedicated FSDP backend connected to TinyEngine through the boundaries in 1.2
+- [ ] First backend/precision combination passes small-model one-step acceptance
 - [ ] Multi-GPU data sharding
-- [ ] Checkpoint save/load
-- [ ] **Validation**: 2-GPU training matches 1-GPU loss curve
+- [ ] Correct gradient accumulation and global clipping
+- [ ] Checkpoint save/load and next-update continuation
+- [ ] **Validation**: Compare two-GPU loss, gradient norm, and updates with a one-GPU reference using the same global batch and declared tolerances
+- [ ] Accept additional backend/precision combinations separately before exposing them as supported
 
 ### Milestone 3: Algorithm Flexibility (Week 5-6)
 - [ ] PPO implementation

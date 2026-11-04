@@ -1,0 +1,30 @@
+# Runtime identity (run_id/rank/role/step) is provided by the entry point.
+global:
+  mode: "off"
+  ranks: [0]
+  all_ranks: false
+  sample_every_steps: 100
+  trace_iterations: []
+  output_dir: ./outputs/profile
+  flush_interval_seconds: 5.0
+  max_pending_records: 1024
+  batch_size: 64
+
+torch:
+  # For NVIDIA FSDP validation use [cpu, cuda]. CPU is locally testable.
+  activities: [cpu]
+  record_shapes: false
+  with_stack: false
+  profile_memory: false
+
+vllm:
+  profiler: null
+  # A shared/worker-accessible directory, required when profiler is torch.
+  torch_profiler_dir: ""
+  torch_profiler_with_stack: false
+  torch_profiler_record_shapes: false
+  torch_profiler_with_memory: false
+  ignore_frontend: true
+  delay_iterations: 0
+  # vLLM engine iterations, NOT RL iterations or output tokens.
+  max_iterations: 10
