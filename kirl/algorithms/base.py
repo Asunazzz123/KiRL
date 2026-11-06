@@ -1,7 +1,6 @@
 """Shared Trainer infrastructure for supervised and post-training algorithms."""
 from __future__ import annotations
 
-import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ import torch
 from accelerate.utils import gather_object
 from transformers import Trainer
 
-logger = logging.getLogger(__name__)
+from ..utils.logging import Log
 
 _DISTRIBUTED_PLATFORM = {
     "FSDP"
@@ -65,7 +64,7 @@ class _BaseTrainer(Trainer):
     _tag_names: ClassVar[tuple[str, ...]] = ("kirl",)
     _paper: ClassVar[dict[str, str]] = {}
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, run_id: str | None = None, probe=None, **kwargs: Any) -> None:
         # Allocate before Trainer initialization so subclass hooks can use it.
         self._metrics: dict[str, dict[str, tuple[float, float]]] = {
             "train": {},
@@ -73,6 +72,16 @@ class _BaseTrainer(Trainer):
         }
         self._evaluating = False
         super().__init__(*args, **kwargs)
+        # A supplied Probe remains owned/closed by the caller. Reuse its run ID
+        # without installing another handler or generating another experiment ID.
+        probe_context = getattr(probe, "logging_context", {})
+        self._logging_context = {
+            "run_id": run_id if run_id is not None else probe_context.get("run_id", Log.get_context()["run_id"]),
+            "role": "trainer",
+            "algorithm": self._name.lower(),
+            "rank": self.accelerator.process_index,
+        }
+        self.logger = Log.get_logger(__name__, **self._logging_context)
         if hasattr(self.model, "add_model_tags"):
             self.model.add_model_tags(list(self._tag_names))
         self._telemetry()
@@ -94,8 +103,16 @@ class _BaseTrainer(Trainer):
             "device": self.accelerator.device.type,
         }
         if self.is_world_process_zero():
-            logger.info("Trainer runtime: %s", metadata)
+            self.logger.info(
+                "Trainer runtime: %s", metadata,
+                extra={"event": "trainer.initialized", "phase": "init", "step": self.state.global_step},
+            )
         return metadata
+
+    def training_step(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        """Attach update context without changing Trainer's loss/backward logic."""
+        with Log.bind(**self._logging_context, phase="update", step=self.state.global_step):
+            return super().training_step(*args, **kwargs)
 
     def store_metrics(
         self,
@@ -142,7 +159,8 @@ class _BaseTrainer(Trainer):
         self._evaluating = True
         self._metrics["eval"].clear()
         try:
-            return super().evaluate(*args, **kwargs)
+            with Log.bind(**self._logging_context, phase="eval", step=self.state.global_step):
+                return super().evaluate(*args, **kwargs)
         finally:
             self._evaluating = previous
             self._metrics["eval"].clear()
@@ -167,7 +185,9 @@ class _BaseTrainer(Trainer):
             merged[key] = total / count
         # Preserve Trainer's loss, timing and other standard metrics on collision.
         merged.update(logs)
-        super().log(merged, *args, **kwargs)
+        with Log.bind(**self._logging_context, phase="eval" if mode == "eval" else "update",
+                      step=self.state.global_step, event=f"{mode}.metrics"):
+            super().log(merged, *args, **kwargs)
         self._metrics[mode].clear()
 
     def model_card(

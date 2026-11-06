@@ -13,6 +13,7 @@ from pathlib import Path
 from .basic_profiler import ProfilerConfig
 from .records import CaptureContext, MetricRecord, StageRecord, TraceArtifact, record_dict, safe_component
 from .sink import JsonlSink
+from ..utils.logging import Log
 
 
 class NullProbe:
@@ -21,16 +22,31 @@ class NullProbe:
     record_path = None
     session_dir = None
 
+    def __init__(self, *, run_id=None, rank=None, role=None, algorithm=None):
+        current = Log.get_context()
+        self.logging_context = {
+            "rank": current["rank"] if rank is None else rank,
+            "role": current["role"] if role is None else role,
+        }
+        if run_id is not None:
+            self.logging_context["run_id"] = run_id
+        if algorithm is not None:
+            self.logging_context["algorithm"] = algorithm
+        self.update_step = 0
+
     @contextmanager
     def iteration(self, iteration_id, *, policy_version=None):
-        yield self
+        with Log.bind(**self.logging_context, step=self.update_step,
+                      iteration_id=iteration_id, policy_version=policy_version):
+            yield self
 
     @contextmanager
     def stage(self, name):
-        yield
+        with Log.bind(**self.logging_context, phase=name, step=self.update_step):
+            yield
 
     def step(self, update_step):
-        pass
+        self.update_step = update_step
 
     def metric(self, name, value, **kwargs):
         return False
@@ -57,7 +73,7 @@ class Probe:
     """
     enabled = True
 
-    def __init__(self, config: ProfilerConfig, *, run_id: str, rank=0, role="train", adapters=()):
+    def __init__(self, config: ProfilerConfig, *, run_id: str, rank=0, role="train", adapters=(), algorithm=None):
         if type(rank) is not int or rank < 0:
             raise ValueError("rank must be a non-negative integer")
         if not config.selects_rank(rank):
@@ -66,6 +82,9 @@ class Probe:
         self.run_id = safe_component(run_id)
         self.role = safe_component(role)
         self.rank = rank
+        self.logging_context = {"run_id": self.run_id, "role": self.role, "rank": rank}
+        if algorithm is not None:
+            self.logging_context["algorithm"] = safe_component(algorithm)
         self.host = socket.gethostname()
         self.pid = os.getpid()
         self.session_id = f"{role}-r{rank}-p{self.pid}-{uuid.uuid4().hex[:12]}"
@@ -102,6 +121,8 @@ class Probe:
             "host": self.host, "pid": self.pid, "iteration_id": self.iteration_id,
             "update_step": self.update_step, "policy_version": self.policy_version,
             "capture_id": self.capture_id, "observation_mode": self.config.mode,
+            "algorithm": self.logging_context.get("algorithm", Log.get_context()["algorithm"]),
+            "phase": Log.get_context()["phase"],
             "timestamp_ns": time.time_ns(), "data": data,
         }
         return self._sink.emit(envelope)
@@ -143,6 +164,13 @@ class Probe:
 
     @contextmanager
     def stage(self, name):
+        # Bind even outside sampled windows so event logs keep their identity.
+        with Log.bind(**self.logging_context, phase=name, step=self.update_step):
+            with self._stage(name):
+                yield
+
+    @contextmanager
+    def _stage(self, name):
         if not self.wants_sample:
             yield
             return
@@ -178,6 +206,13 @@ class Probe:
 
     @contextmanager
     def iteration(self, iteration_id, *, policy_version=None):
+        with Log.bind(**self.logging_context, step=self.update_step,
+                      iteration_id=iteration_id, policy_version=policy_version):
+            with self._iteration(iteration_id, policy_version=policy_version):
+                yield self
+
+    @contextmanager
+    def _iteration(self, iteration_id, *, policy_version=None):
         if self._closed:
             raise RuntimeError("Probe is closed")
         if self.iteration_id is not None:
@@ -232,6 +267,7 @@ class Probe:
         self._close_result = {
             "schema_version": 1, "run_id": self.run_id, "session_id": self.session_id,
             "role": self.role, "rank": self.rank, "host": self.host, "pid": self.pid,
+            "algorithm": self.logging_context.get("algorithm", Log.get_context()["algorithm"]),
             "configuration": asdict(self.config), "adapters": [a.name for a in self.adapters],
             "elapsed_host_seconds_including_drain": (time.perf_counter_ns() - self._started_ns) / 1e9,
             "measurement_kind": "host_wall_no_device_sync", "sink": stats, "adapter_errors": self._errors,
@@ -249,9 +285,9 @@ class Probe:
         self.close()
 
 
-def create_probe(config: ProfilerConfig, *, run_id: str, rank=0, role="train", adapters=()):
+def create_probe(config: ProfilerConfig, *, run_id: str, rank=0, role="train", adapters=(), algorithm=None):
     if type(rank) is not int or rank < 0:
         raise ValueError("rank must be a non-negative integer")
     if not config.selects_rank(rank):
-        return NullProbe()
-    return Probe(config, run_id=run_id, rank=rank, role=role, adapters=adapters)
+        return NullProbe(run_id=run_id, rank=rank, role=role, algorithm=algorithm)
+    return Probe(config, run_id=run_id, rank=rank, role=role, adapters=adapters, algorithm=algorithm)

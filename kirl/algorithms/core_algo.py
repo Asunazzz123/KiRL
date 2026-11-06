@@ -54,11 +54,11 @@ def compute_grpo_policy_loss(
         count = mask.sum().clamp_min(1)
         clip_active = clipped < unclipped
         metadata = {
-            "policy_loss": loss.detach(),
-            "ratio_mean": torch.where(
+            "policy/loss": loss.detach(),
+            "policy/ratio_mean": torch.where(
                 mask,ratio,0.0
             ).sum() / count,
-            "clip_fraction": (clip_active&mask).float().sum() / count
+            "policy/clip_fraction": (clip_active&mask).float().sum() / count
         }
     return loss, metadata
 
@@ -102,11 +102,11 @@ def compute_dpo_loss(
 
     with torch.no_grad():
         metadata = {
-            "dpo_loss": loss.detach(),
-            "rewards/chosen": chosen_reward.mean(),
-            "rewards/rejected": rejected_reward.mean(),
-            "rewards/margin": margin.mean(),
-            "rewards/accuracy": (margin > 0).float().mean(),
+            "dpo/loss": loss.detach(),
+            "reward/chosen": chosen_reward.mean(),
+            "reward/rejected": rejected_reward.mean(),
+            "reward/margin": margin.mean(),
+            "reward/accuracy": (margin > 0).float().mean(),
         }
     return loss, metadata
 
@@ -177,13 +177,13 @@ def compute_ppo_policy_loss(
 
     with torch.no_grad():
         metadata = {
-            "policy_loss": loss.detach(),
-            "ratio_mean": _reduce_ppo_tokens(ratio, mask, "token_mean"),
-            "clip_fraction": _reduce_ppo_tokens(
+            "policy/loss": loss.detach(),
+            "policy/ratio_mean": _reduce_ppo_tokens(ratio, mask, "token_mean"),
+            "policy/clip_fraction": _reduce_ppo_tokens(
                 (clipped < unclipped).float(), mask, "token_mean",
             ),
             # Rollout-policy KL diagnostic, not a reference-model KL penalty.
-            "approx_kl": _reduce_ppo_tokens(
+            "policy/approx_kl": _reduce_ppo_tokens(
                 ratio - 1 - log_ratio, mask, "token_mean",
             ),
         }
@@ -227,12 +227,12 @@ def compute_ppo_value_loss(
 
     with torch.no_grad():
         metadata = {
-            "value_loss": loss.detach(),
-            "value_clip_fraction": _reduce_ppo_tokens(
+            "value/loss": loss.detach(),
+            "value/clip_fraction": _reduce_ppo_tokens(
                 (clipped_error > raw_error).float(), mask, "token_mean",
             ),
-            "values/mean": _reduce_ppo_tokens(current, mask, "token_mean"),
-            "returns/mean": _reduce_ppo_tokens(target, mask, "token_mean"),
+            "value/mean": _reduce_ppo_tokens(current, mask, "token_mean"),
+            "return/mean": _reduce_ppo_tokens(target, mask, "token_mean"),
         }
     return loss, metadata
 
@@ -271,8 +271,8 @@ def compute_dr_grpo_policy_loss(
     with torch.no_grad():
         count = mask.sum().clamp_min(1)
         metadata = {
-            "policy_loss": loss.detach(),
-            "ratio_mean": torch.where(mask, ratio, 0.0).sum() / count,
-            "clip_fraction": ((clipped < unclipped) & mask).float().sum() / count,
+            "policy/loss": loss.detach(),
+            "policy/ratio_mean": torch.where(mask, ratio, 0.0).sum() / count,
+            "policy/clip_fraction": ((clipped < unclipped) & mask).float().sum() / count,
         }
     return loss, metadata

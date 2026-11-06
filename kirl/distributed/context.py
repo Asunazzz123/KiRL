@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import logging
 import torch
 import torch.distributed as dist
 
@@ -11,7 +10,7 @@ import torch.distributed as dist
 from dataclasses import dataclass
 from typing import Any, Callable, TypeVar
 
-from utils.logging import Log
+from ..utils.logging import Log
 logger = Log.get_logger(__name__)
 
 
@@ -47,7 +46,8 @@ class DistributedContext:
             local_rank,
             os.environ.get("WORLD_SIZE","?"),
             backend,
-            device
+            device,
+            extra={"phase": "init", "event": "distributed.initializing"},
         )
         # 从环境变量中初始化进程组
         dist.init_process_group(backend=backend,init_method="env://")
@@ -56,6 +56,7 @@ class DistributedContext:
             "Process group initialized: rank=%s world_size=%s",
             dist.get_rank(),
             dist.get_world_size(),
+            extra={"phase": "init", "event": "distributed.initialized", "rank": dist.get_rank()},
         )
 
         return cls(
