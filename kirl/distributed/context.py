@@ -109,27 +109,28 @@ class DistributedContext:
 
         return None
 
-    def agree(self, keys: str, value: Any):
-        """
-        通过每一个rank 的value hash化后比较sha256指纹，检查所有rank在ckeckpoint的数据一致性
-        """
-        import hashlib
-        import pickle
+    # def agree(self, keys: str, value: Any):
+    #     """
+    #     通过每一个rank 的value hash化后比较sha256指纹，检查所有rank在ckeckpoint的数据一致性
+    #     """
+    #     import hashlib
+    #     import pickle
 
-        value_bytes = pickle.dumps(value)
-        value_hash = hashlib.sha256(value_bytes).hexdigest()
-        hash_tensor = torch.tensor(list(value_hash),dtype=torch.uint8, device=self.device)
+    #     value_bytes = pickle.dumps(value)
+    #     value_hash = hashlib.sha256(value_bytes).hexdigest()
+    #     hash_tensor = torch.tensor(list(value_hash),dtype=torch.uint8, device=self.device)
 
-        all_hashes = [torch.zeros_like(hash_tensor) for _ in range(self.world_size)]
-        dist.all_gather(all_hashes, hash_tensor)
+    #     all_hashes = [torch.zeros_like(hash_tensor) for _ in range(self.world_size)]
+    #     dist.all_gather(all_hashes, hash_tensor)
 
-        first_hash = all_hashes[0].item()
-        for rank, h in enumerate(all_hashes):
-            if h.item() != first_hash:
-                raise RuntimeError(
-                    f"Disagreement on '{keys}': rank 0 has hash {first_hash}, "
-                    f"rank {rank} has hash {h.item()}"
-                )
+    #     first_hash = all_hashes[0].item()
+    #     for rank, h in enumerate(all_hashes):
+    #         if h.item() != first_hash:
+    #             raise RuntimeError(
+    #                 f"Disagreement on '{keys}': rank 0 has hash {first_hash}, "
+    #                 f"rank {rank} has hash {h.item()}"
+    #             )
+    def agree(self, keys:str, value: Any):
 
 
 

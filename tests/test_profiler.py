@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from tiny_engine.profiler import (
+from kirl.profiler import (
     ProfilerConfig, TorchProfilerAdapter, TorchProfilerConfig,
     VLLMProfilerAdapter, VLLMProfilerConfig, CaptureContext,
     create_probe, build_report,
 )
-from tiny_engine.profiler.settings import ProfilerSettings
-from tiny_engine.profiler.sink import JsonlSink
+from kirl.profiler.settings import ProfilerSettings
+from kirl.profiler.sink import JsonlSink
 
 
 def read_records(probe):

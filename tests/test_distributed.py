@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from tiny_engine.distributed.context import DistributedContext
+from kirl.distributed.context import DistributedContext
 
 
 
@@ -27,7 +27,7 @@ def ctx():
 
     context  = DistributedContext.from_torchrun()
 
-    try: 
+    try:
         yield context
     finally:
         dist.destroy_process_group()
