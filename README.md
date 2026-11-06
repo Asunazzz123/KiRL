@@ -1,4 +1,4 @@
-# TinyEngine
+# KiRL
 
 An educational RL training engine for understanding bottom-level design patterns in reinforcement learning systems.
 
@@ -12,8 +12,8 @@ An educational RL training engine for understanding bottom-level design patterns
 ## Project Structure
 
 ```
-TinyEngine/
-├── tiny_engine/
+KiRL/
+├── kirl/
 │   ├── algorithms/         # Pluggable RL algorithms
 │   │   ├── base.py        # Base algorithm interface
 │   │   ├── grpo.py        # GRPO implementation
@@ -147,7 +147,7 @@ deterministic: true
 ## Adding New Components
 
 ### New Algorithm
-1. Create `tiny_engine/algorithms/your_algo.py`
+1. Create `kirl/algorithms/your_algo.py`
 2. Inherit from `BaseAlgorithm` and implement:
    - `compute_advantages()`
    - `compute_loss()`
@@ -155,7 +155,7 @@ deterministic: true
 4. Add config to `configs/algo/your_algo.yaml`
 
 ### New Dataset
-1. Create `tiny_engine/datasets/your_dataset.py`
+1. Create `kirl/datasets/your_dataset.py`
 2. Inherit from `BaseDataset` and implement:
    - `load_raw_data()`
    - `parse_sample()`
