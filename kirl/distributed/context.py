@@ -108,31 +108,37 @@ class DistributedContext:
             return fn(*args,**kwargs)
 
         return None
+    
+    def agree(self, key: str, value: Any) -> None:
+        """检查所有 rank 的 key/value 是否一致；所有 rank 必须按相同顺序调用。"""
+        import hashlib
+        import json
 
-    # def agree(self, keys: str, value: Any):
-    #     """
-    #     通过每一个rank 的value hash化后比较sha256指纹，检查所有rank在ckeckpoint的数据一致性
-    #     """
-    #     import hashlib
-    #     import pickle
+        payload = json.dumps(
+            {"key": key, "value": value},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
 
-    #     value_bytes = pickle.dumps(value)
-    #     value_hash = hashlib.sha256(value_bytes).hexdigest()
-    #     hash_tensor = torch.tensor(list(value_hash),dtype=torch.uint8, device=self.device)
+        fingerprint = torch.tensor(
+            list(hashlib.sha256(payload).digest()),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        fingerprints = self.all_gather(fingerprint)
 
-    #     all_hashes = [torch.zeros_like(hash_tensor) for _ in range(self.world_size)]
-    #     dist.all_gather(all_hashes, hash_tensor)
-
-    #     first_hash = all_hashes[0].item()
-    #     for rank, h in enumerate(all_hashes):
-    #         if h.item() != first_hash:
-    #             raise RuntimeError(
-    #                 f"Disagreement on '{keys}': rank 0 has hash {first_hash}, "
-    #                 f"rank {rank} has hash {h.item()}"
-    #             )
-    def agree(self, keys:str, value: Any):
-
-
+        mismatched = [
+            rank
+            for rank, other in enumerate(fingerprints)
+            if not torch.equal(other, fingerprints[0])
+        ]
+        if mismatched:
+            raise RuntimeError(
+                f"Disagreement on {key!r}: "
+                f"ranks {mismatched} differ from rank 0"
+            )
 
 
 
