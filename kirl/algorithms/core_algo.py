@@ -12,9 +12,9 @@ def compute_grpo_policy_loss(
     response_mask: torch.Tensor,
     *,
     clip_eps: float = 0.2,
-    reduction: str = "sequence_mean"      
+    reduction: str = "sequence_mean"
 ):
-    assert 0 <= clip_eps < 1,"clip_eps must be in [0, 1)" 
+    assert 0 <= clip_eps < 1,"clip_eps must be in [0, 1)"
     assert reduction in {"sequence_mean", "token_mean"},"reduction must be 'sequence_mean' or 'token_mean'"
 
     mask = response_mask.bool()
@@ -71,13 +71,8 @@ def compute_dpo_loss(
     *,
     beta: float = 0.1,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute standard sigmoid DPO loss over preference pairs.
-
-    All inputs are finite, floating-point tensors of shape [B], on the same
-    device, with B > 0. Each element is the SUM of response-token log
-    probabilities, excluding prompt and padding (not a token mean).
-    Reference probabilities are fixed targets; both policy branches retain
-    their gradients. The trainer owns model forward and token aggregation.
+    """
+    Compute standard sigmoid DPO loss over preference pairs.
     """
     tensors = (chosen_log_probs, rejected_log_probs,
                reference_chosen_log_probs, reference_rejected_log_probs)
@@ -114,7 +109,9 @@ def compute_dpo_loss(
 def _validate_ppo_inputs(
     response_mask: torch.Tensor, **tensors: torch.Tensor,
 ) -> None:
-    """Validate shape/device contracts without synchronizing accelerator values."""
+    """
+    Validate shape/device contracts without synchronizing accelerator values.
+    """
     if response_mask.ndim != 2 or response_mask.shape[0] == 0:
         raise ValueError("response_mask must have shape [B, T] with B > 0")
     for name, tensor in tensors.items():
@@ -149,14 +146,8 @@ def compute_ppo_policy_loss(
     clip_eps: float = 0.2,
     reduction: str = "token_mean",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute PPO-Clip actor loss, excluding entropy and reference KL terms.
-
-    All tensors have shape [B, T]. Advantages are per-token estimates, e.g.
-    from GAE, computed by the caller. Old probabilities and advantages are
-    detached. The response mask is binary; valid inputs must be finite.
-    Empty responses are excluded from sequence_mean. No advantage whitening,
-    distributed communication or gradient-accumulation scaling is performed.
-    The trainer must weight unequal microbatch/rank denominators correctly.
+    """
+    Compute PPO-Clip actor loss, excluding entropy and reference KL terms.
     """
     _validate_ppo_inputs(
         response_mask, log_probs=log_probs, old_log_probs=old_log_probs,
@@ -199,14 +190,8 @@ def compute_ppo_value_loss(
     clip_eps: float = 0.2,
     reduction: str = "token_mean",
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute PPO clipped critic loss: 0.5 * max(raw MSE, clipped MSE).
-
-    Inputs have shape [B, T] and response_mask is binary. Values at valid
-    positions must be finite. Only current values retain gradients. clip_eps
-    is an absolute value-change bound, independent of the actor ratio bound.
-    Returns/bootstrap/GAE are computed outside this function. Reduction and
-    distributed weighting follow compute_ppo_policy_loss; the trainer applies
-    the value-loss coefficient when combining actor and critic losses.
+    """
+    Compute PPO clipped critic loss: 0.5 * max(raw MSE, clipped MSE).
     """
     _validate_ppo_inputs(
         response_mask, values=values, old_values=old_values, returns=returns,
@@ -249,10 +234,9 @@ def compute_dr_grpo_policy_loss(
     """
     Compute Dr. GRPO clipped policy loss without a KL penalty.
     """
-   
-    assert 0 <= clip_eps < 1,"clip_eps must be in [0, 1)" 
-    
-    
+
+    assert 0 <= clip_eps < 1,"clip_eps must be in [0, 1)"
+
 
     mask = response_mask.bool()
     log_ratio = torch.where(

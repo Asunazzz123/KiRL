@@ -18,7 +18,7 @@ class JsonlSink:
         self._closed = False
         self.accepted = self.written = self.dropped = 0
         self.error = None
-        self._thread = threading.Thread(target=self._run, name="tiny-engine-metrics", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="kirl-metrics", daemon=True)
         self._thread.start()
 
     def emit(self, record: dict) -> bool:

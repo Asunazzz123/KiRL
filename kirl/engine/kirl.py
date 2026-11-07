@@ -1,4 +1,4 @@
-"""TinyEngine core implementation."""
+"""KiRL core implementation."""
 import torch
 import torch.nn as nn
 from typing import Any, Callable, TypeVar

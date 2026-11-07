@@ -1,1 +1,1 @@
-"""Unit tests for TinyEngine."""
+"""Unit tests for KiRL."""

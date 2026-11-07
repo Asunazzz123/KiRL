@@ -47,17 +47,8 @@ class RolloutData:
 
 
 class _BaseTrainer(Trainer):
-    """Common infrastructure, with the training loop owned by Transformers.
-
-    Subclasses implement their objective in ``compute_loss`` and may override
-    ``_prepare_inputs`` or ``training_step`` for rollout-based algorithms. Keep
-    optimizer, scheduler, checkpoint and distributed preparation in Trainer;
-    models passed here must not already be wrapped by KiRL's FSDPBackend.
-
-    ``compute_loss`` should accept ``**kwargs`` for Transformers compatibility.
-    Custom losses that do not consume ``num_items_in_batch`` should set
-    ``self.model_accepts_loss_kwargs = False`` after initialization so Trainer
-    handles gradient accumulation scaling. Do not scale such losses again.
+    """
+    Common infrastructure, with the training loop owned by Transformers.
     """
 
     _name: ClassVar[str] = "Base"
@@ -121,14 +112,8 @@ class _BaseTrainer(Trainer):
         mode: Literal["train", "eval"] | None = None,
         weight: float = 1.0,
     ) -> None:
-        """Buffer local scalar means until the next Trainer logging event.
-
-        Pass the number of contributing examples/tokens as ``weight`` for a
-        sample/token-weighted mean. The default averages calls equally. Record
-        local values on every rank; do not pass already globally reduced values
-        with local weights. Tensor inputs are detached and never retain graphs.
-        Evaluation sampler padding is not removed here; callers must exclude
-        duplicate examples when computing their metrics and weights.
+        """
+        Buffer local scalar means until the next Trainer logging event.
         """
         mode = mode if mode is not None else ("train" if self.model.training else "eval")
         if mode not in self._metrics:
@@ -166,11 +151,8 @@ class _BaseTrainer(Trainer):
             self._metrics["eval"].clear()
 
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
-        """Merge weighted algorithm metrics into Trainer's logging pipeline.
-
-        All ranks must call this in the same order, including ranks with no
-        buffered metrics. Object gathering permits different metric keys across
-        ranks. Extra arguments pass through to the installed Trainer version.
+        """
+        Merge weighted algorithm metrics into Trainer's logging pipeline.
         """
         mode = "eval" if self._evaluating or any(name.startswith("eval_") for name in logs) else "train"
         totals: dict[str, tuple[float, float]] = {}

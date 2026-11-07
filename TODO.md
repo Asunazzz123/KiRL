@@ -1,11 +1,11 @@
-# TinyEngine Implementation TODO
+# KiRL Implementation TODO
 
 ## Project Setup
 
 - [ ] Initialize project structure
   ```
-  TinyEngine/
-  ├── tiny_engine/
+  KiRL/
+  ├── kirl/
   │   ├── algorithms/         # Algorithm module
   │   ├── datasets/           # Dataset module
   │   ├── engine/             # Engine core
@@ -39,7 +39,7 @@
 
 ### 1.1 Distributed Context (Priority: HIGH)
 
-**File**: `tiny_engine/distributed/context.py`
+**File**: `kirl/distributed/context.py`
 
 - [ ] Implement `DistributedContext` class
   ```python
@@ -75,7 +75,7 @@
 
 ### 1.2 FSDP Configuration and Backend (Priority: HIGH)
 
-**Goal**: Establish a dedicated FSDP backend that exposes a small, stable interface to TinyEngine. Keep backend-specific behavior out of the training orchestration code.
+**Goal**: Establish a dedicated FSDP backend that exposes a small, stable interface to KiRL. Keep backend-specific behavior out of the training orchestration code.
 
 **Planned responsibility boundaries** (new paths are planned, not yet implemented):
 
@@ -84,11 +84,11 @@
 | `distributed/context.py` | Process identity, device binding, process-group lifecycle, and shared communication helpers |
 | `distributed/fsdp_config.py` | Configuration values, defaults, and validation; no model construction or distributed initialization |
 | `distributed/fsdp_backend.py` (planned) | FSDP1/FSDP2 selection, wrapping, precision policies, gradient synchronization, global clipping, and backend-specific state access |
-| `engine/tiny_engine.py` | Model/optimizer ownership and orchestration of initialization, forward, backward, update, and evaluation |
+| `engine/kirl.py` | Model/optimizer ownership and orchestration of initialization, forward, backward, update, and evaluation |
 | `engine/checkpoint.py` | Checkpoint contents, persistence, metadata, retention, and recovery, using the backend's state interface |
 | `pipeline/` and training entry scripts | Data flow, algorithm loss, training schedule, logging setup, and process cleanup |
 
-Start with one backend module. Separate FSDP1/FSDP2 implementations later only if their complexity warrants it. The backend must not depend on TinyEngine or on a particular RL algorithm.
+Start with one backend module. Separate FSDP1/FSDP2 implementations later only if their complexity warrants it. The backend must not depend on KiRL or on a particular RL algorithm.
 
 #### 1.2.1 Configuration Contract
 
@@ -120,7 +120,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 - [ ] Require optimizer construction after model preparation
 - [ ] Record the effective backend, precision, wrapping targets, and topology in startup diagnostics
 
-#### 1.2.3 Runtime Services Exposed to TinyEngine
+#### 1.2.3 Runtime Services Exposed to KiRL
 
 - [ ] Expose gradient synchronization control for accumulation, with a documented all-rank participation contract
 - [ ] Expose global gradient norm/clipping behavior appropriate to each backend
@@ -142,11 +142,11 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 **Deferred extensions**: CPU/activation offload, meta-device loading, hybrid sharding, prefetch tuning, LoRA, quantization, sequence parallelism, and external rollout weight synchronization. Add separate acceptance tasks before enabling any of these features.
 
-### 1.3 TinyEngine Core (Priority: HIGH)
+### 1.3 KiRL Core (Priority: HIGH)
 
-**File**: `tiny_engine/engine/tiny_engine.py`
+**File**: `kirl/engine/kirl.py`
 
-**Dependency**: Use the backend contract from 1.2. TinyEngine owns training state and invokes backend services; it does not duplicate FSDP wrapping, collective clipping, or state conversion logic.
+**Dependency**: Use the backend contract from 1.2. KiRL owns training state and invokes backend services; it does not duplicate FSDP wrapping, collective clipping, or state conversion logic.
 
 - [ ] Define model initialization and ownership
   - Load the model, apply requested model preparation, and delegate distributed wrapping
@@ -189,7 +189,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 1.4 Checkpoint Management (Priority: MEDIUM)
 
-**File**: `tiny_engine/engine/checkpoint.py`
+**File**: `kirl/engine/checkpoint.py`
 
 - [ ] Separate resumable training checkpoints from model-only export
 - [ ] Define checkpoint contents and ownership
@@ -222,7 +222,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 2.1 Base Algorithm Interface (Priority: HIGH)
 
-**File**: `tiny_engine/algorithms/base.py`
+**File**: `kirl/algorithms/base.py`
 
 - [ ] Define `RolloutData` dataclass
   ```python
@@ -273,7 +273,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 2.2 GRPO Implementation (Priority: HIGH)
 
-**File**: `tiny_engine/algorithms/grpo.py`
+**File**: `kirl/algorithms/grpo.py`
 
 - [ ] Implement GRPO advantage estimation
   - Group-based normalization
@@ -292,7 +292,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 2.3 PPO Implementation (Priority: MEDIUM)
 
-**File**: `tiny_engine/algorithms/ppo.py`
+**File**: `kirl/algorithms/ppo.py`
 
 - [ ] Implement GAE (Generalized Advantage Estimation)
   - Reference: `verl/verl/trainer/ppo/core_algos.py`
@@ -309,7 +309,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 2.4 DPO Implementation (Priority: LOW)
 
-**File**: `tiny_engine/algorithms/dpo.py`
+**File**: `kirl/algorithms/dpo.py`
 
 - [ ] Implement DPO loss (preference-based)
   - No advantage computation (direct loss on preferred/rejected pairs)
@@ -321,7 +321,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 3.1 Base Dataset Interface (Priority: HIGH)
 
-**File**: `tiny_engine/datasets/base.py`
+**File**: `kirl/datasets/base.py`
 
 - [ ] Define `BaseDataset` interface
   ```python
@@ -364,7 +364,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 3.2 GSM8K Dataset (Priority: HIGH)
 
-**File**: `tiny_engine/datasets/gsm8k.py`
+**File**: `kirl/datasets/gsm8k.py`
 
 - [ ] Load GSM8K from HuggingFace or local JSON
 - [ ] Parse format: `{"question": "...", "answer": "..."}`
@@ -378,7 +378,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 3.3 MATH Dataset (Priority: MEDIUM)
 
-**File**: `tiny_engine/datasets/math.py`
+**File**: `kirl/datasets/math.py`
 
 - [ ] Load MATH dataset (HuggingFace)
 - [ ] Parse problem + solution format
@@ -386,7 +386,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 3.4 Custom Dataset Support (Priority: LOW)
 
-**File**: `tiny_engine/datasets/custom.py`
+**File**: `kirl/datasets/custom.py`
 
 - [ ] Generic dataset loader for user-provided JSONL files
 - [ ] Configurable field mapping (e.g., "question" → "input", "answer" → "target")
@@ -397,7 +397,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 4.1 Training Loop (Priority: HIGH)
 
-**File**: `tiny_engine/pipeline/train.py`
+**File**: `kirl/pipeline/train.py`
 
 - [ ] Implement main training loop
   ```python
@@ -408,7 +408,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
       # 2. Load modules
       algo = ALGO_REGISTRY[config.algo.name](config.algo)
       dataset = DATASET_REGISTRY[config.dataset.name](config.dataset)
-      engine = TinyEngine(model_factory, config.engine, ctx)
+      engine = KiRL(model_factory, config.engine, ctx)
 
       # 3. Prepare data
       train_data = dataset.load_raw_data("train")
@@ -452,12 +452,12 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 4.2 Evaluation Loop (Priority: HIGH)
 
-**File**: `tiny_engine/pipeline/evaluate.py`
+**File**: `kirl/pipeline/evaluate.py`
 
 - [ ] Implement evaluation loop
   ```python
   def evaluate(
-      engine: TinyEngine,
+      engine: KiRL,
       dataset: BaseDataset,
       config: DictConfig
   ) -> dict[str, float]:
@@ -483,7 +483,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 4.3 Reward Function Module (Priority: MEDIUM)
 
-**File**: `tiny_engine/pipeline/rewards.py`
+**File**: `kirl/pipeline/rewards.py`
 
 - [ ] Implement reward function interface
   ```python
@@ -549,7 +549,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 5.2 Logging and Metrics (Priority: MEDIUM)
 
-**File**: `tiny_engine/utils/logging.py`
+**File**: `kirl/utils/logging.py`
 
 - [ ] Implement metric logger
   - Configure logging in each training process entry point; modules only acquire named loggers
@@ -565,7 +565,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### 5.3 Utilities (Priority: LOW)
 
-**File**: `tiny_engine/utils/helpers.py`
+**File**: `kirl/utils/helpers.py`
 
 - [ ] Sampling utilities
   - `sample_batch(data, batch_size)` with optional replacement
@@ -727,13 +727,13 @@ Local CPU tests and fake engine calls do not establish GPU correctness, real vLL
 ### Milestone 1: Minimal Working Engine (Week 1-2)
 - [x] ARCHITECTURE.md completed
 - [x] TODO.md completed
-- [ ] DistributedContext + TinyEngine (forward/backward/step only)
+- [ ] DistributedContext + KiRL (forward/backward/step only)
 - [ ] Single algorithm (GRPO) + single dataset (GSM8K)
 - [ ] Single-GPU training loop (no FSDP yet)
 - [ ] **Validation**: Train on 100 GSM8K samples, loss decreases
 
 ### Milestone 2: Multi-GPU Training (Week 3-4)
-- [ ] Dedicated FSDP backend connected to TinyEngine through the boundaries in 1.2
+- [ ] Dedicated FSDP backend connected to KiRL through the boundaries in 1.2
 - [ ] First backend/precision combination passes small-model one-step acceptance
 - [ ] Multi-GPU data sharding
 - [ ] Correct gradient accumulation and global clipping
@@ -788,7 +788,7 @@ Local CPU tests and fake engine calls do not establish GPU correctness, real vLL
 
 ## Post-Implementation: Learning Exercises
 
-After completing the baseline, use TinyEngine to explore:
+After completing the baseline, use KiRL to explore:
 
 1. **Gradient Accumulation Trade-offs**
    - Run with 1/2/4/8 accumulation steps

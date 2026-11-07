@@ -1,4 +1,4 @@
-# TinyEngine Training Configuration
+# KiRL Training Configuration
 
 defaults:
   - algo: grpo

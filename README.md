@@ -25,7 +25,7 @@ KiRL/
 │   │   ├── math.py        # MATH dataset
 │   │   └── custom.py      # Custom dataset loader
 │   ├── engine/            # Engine core
-│   │   ├── tiny_engine.py # Main engine implementation
+│   │   ├── kirl.py # Main engine implementation
 │   │   └── checkpoint.py  # Checkpoint management
 │   ├── pipeline/          # Training/inference pipeline
 │   │   ├── train.py       # Training loop

@@ -1,1 +1,1 @@
-"""Runnable examples for TinyEngine (invoke with python -m examples.<name>)."""
+"""Runnable examples for KiRL (invoke with python -m examples.<name>)."""

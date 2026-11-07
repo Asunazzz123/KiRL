@@ -37,7 +37,7 @@ class TorchProfilerAdapter:
         if self._prof is not None:
             raise RuntimeError("This adapter already has an active capture")
         if not _capture_lock.acquire(blocking=False):
-            raise RuntimeError("Another TinyEngine torch profiler is already active in this process")
+            raise RuntimeError("Another KiRL torch profiler is already active in this process")
         try:
             import torch
 

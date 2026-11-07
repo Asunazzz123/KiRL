@@ -1,8 +1,8 @@
-# TinyEngine Architecture
+# KiRL Architecture
 
 ## Design Intent
 
-TinyEngine is an educational RL training engine designed to help understand:
+KiRL is an educational RL training engine designed to help understand:
 - Bottom-level design patterns in RL training systems
 - Module optimization opportunities
 - How to decouple algorithm logic from training/inference infrastructure
@@ -229,7 +229,7 @@ class GSM8KDataset(BaseDataset):
 
 ### Interface
 ```python
-class TinyEngine:
+class KiRL:
     def __init__(
         self,
         model_factory: Callable,
@@ -291,7 +291,7 @@ def train_loop(config):
     # Initialize modules
     algo = ALGO_REGISTRY[config.algo](config.algo_config)
     dataset = DATASET_REGISTRY[config.dataset](config.data_config)
-    engine = TinyEngine(model_factory, fsdp_config, context)
+    engine = KiRL(model_factory, fsdp_config, context)
     
     # Prepare data
     train_data = dataset.load_raw_data("train")
@@ -412,7 +412,7 @@ Rank 3: data[3::4]  ──┘
 
 ## Optimization Opportunities (Educational Focus)
 
-After building the baseline, TinyEngine should make it easy to explore:
+After building the baseline, KiRL should make it easy to explore:
 
 1. **Gradient Accumulation Scheduling**
    - How many microbatches before sync?
@@ -452,7 +452,7 @@ After building the baseline, TinyEngine should make it easy to explore:
 
 ## Success Criteria
 
-TinyEngine is successful if:
+KiRL is successful if:
 - [ ] A new algorithm can be added in <100 lines (just the algo class)
 - [ ] A new dataset can be added in <150 lines (just the dataset class)
 - [ ] Training loop code is <300 lines (pipeline orchestration)

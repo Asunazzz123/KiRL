@@ -1,1 +1,1 @@
-"""TinyEngine: Educational RL Training Engine for understanding底层设计."""
+"""KiRL: Educational RL Training Engine for understanding底层设计."""
