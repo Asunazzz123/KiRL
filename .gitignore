@@ -67,3 +67,11 @@ Thumbs.db
 # Hydra
 .hydra/
 multirun/
+
+# SSH Proxy Setting
+proxy.ps1
+proxy.sh
+
+
+
+

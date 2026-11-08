@@ -1,15 +1,18 @@
 """Shared Trainer infrastructure for supervised and post-training algorithms."""
 from __future__ import annotations
 
+import torch
 import math
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
 from typing import Any, ClassVar, Literal
-
-import torch
 from accelerate.utils import gather_object
-from transformers import Trainer
+from transformers import (
+    Trainer, TrainingArguments, PreTrainedModel, AutoModelForCausalLM,
+    AutoTokenizer, PreTrainedTokenizerBase,
+)
 
 from ..utils.logging import Log
 
@@ -189,3 +192,123 @@ class _BaseTrainer(Trainer):
             "tags": sorted(set(self._tag_names).union(extra_tags)),
             "paper": dict(self._paper),
         }
+
+    @staticmethod
+    def _resolve_model(
+            model: str | PreTrainedModel,
+            *,
+            model_init_kwargs: dict | None = None
+        ) -> PreTrainedModel:
+            """
+            Resolve
+            """
+            if isinstance(model,str):
+                assert model.strip(), "model 字段不能为空字符串!"
+                model = AutoModelForCausalLM.from_pretrained(
+                    model,
+                    **(model_init_kwargs or {})
+                )
+            elif isinstance(model,PreTrainedModel):
+                if model_init_kwargs is not None:
+                    raise ValueError("传入模型不能再设置model_init_kwargs")
+            else:
+                raise ValueError("model 必须是字符串或者PreTrainedModel实例")
+            return model
+
+    @classmethod
+    def _validate_config(
+        cls, args: TrainingArguments | None = None,
+    ) -> TrainingArguments | None:
+        """Validate common Trainer arguments without initializing runtime state."""
+        if args is not None and not isinstance(args, TrainingArguments):
+            raise TypeError("args must be TrainingArguments or None")
+        return args
+
+    @staticmethod
+    def _require_mapping(name: str, value: Any) -> None:
+        if value is not None and not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping or None")
+
+    @staticmethod
+    def _require_int(name: str, value: Any, minimum: int) -> int:
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
+        if value < minimum:
+            raise ValueError(f"{name} must be >= {minimum}")
+        return value
+
+    @staticmethod
+    def _require_number(name: str, value: Any) -> Real:
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise TypeError(f"{name} must be a real number")
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        return value
+
+    @classmethod
+    def _validate_generation_config(cls, config: Mapping[str, Any]) -> None:
+        """
+        Validate common text generation fields, when explicitly requested.
+        """
+        if not isinstance(config, Mapping):
+            raise TypeError("generation_config must be a non-None mapping with resolved defaults")
+        cls._require_int("max_new_tokens", config["max_new_tokens"], 1)
+        if cls._require_number("temperature", config["temperature"]) <= 0:
+            raise ValueError("temperature must be > 0")
+        if not 0 < cls._require_number("top_p", config["top_p"]) <= 1:
+            raise ValueError("top_p must satisfy 0 < top_p <= 1")
+        if type(config["do_sample"]) is not bool:
+            raise TypeError("do_sample must be a boolean")
+
+
+    @classmethod
+    def _resolve_tokenizer(
+        cls,
+        model: str | PreTrainedModel,
+        processing_class: PreTrainedTokenizerBase | None = None,
+        *,
+        tokenizer_init_kwargs: Mapping[str, Any] | None = None,
+        padding_side: str | None = None,
+        require_padding: bool = False,
+    ) -> PreTrainedTokenizerBase:
+        """Resolve a text tokenizer; explicit padding settings mutate it in place.
+
+        Loading options are independent of model loading options. A requested
+        padding side takes precedence over tokenizer_init_kwargs. Reusing EOS
+        for padding requires callers to preserve the tokenizer's attention mask.
+        """
+        cls._require_mapping("tokenizer_init_kwargs", tokenizer_init_kwargs)
+        if padding_side not in (None, "left", "right"):
+            raise ValueError("padding_side must be 'left', 'right' or None")
+        if type(require_padding) is not bool:
+            raise TypeError("require_padding must be a boolean")
+
+        if processing_class is not None:
+            if not isinstance(processing_class, PreTrainedTokenizerBase):
+                raise TypeError("processing_class must be a text PreTrainedTokenizerBase")
+            if tokenizer_init_kwargs is not None:
+                raise ValueError("An instantiated tokenizer cannot use tokenizer_init_kwargs")
+            tokenizer = processing_class
+        else:
+            if isinstance(model, str):
+                source = model
+            elif isinstance(model, PreTrainedModel):
+                source = getattr(model.config, "_name_or_path", None)
+            else:
+                raise TypeError("model must be a string or PreTrainedModel")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("Cannot infer tokenizer source; pass processing_class explicitly")
+            tokenizer = AutoTokenizer.from_pretrained(
+                source,
+                **dict(tokenizer_init_kwargs if tokenizer_init_kwargs is not None else {}),
+            )
+
+        if padding_side is not None:
+            tokenizer.padding_side = padding_side
+        if require_padding and tokenizer.pad_token_id is None:
+            if tokenizer.eos_token_id is None:
+                raise ValueError("Tokenizer requires a pad token or an EOS token to reuse")
+            tokenizer.pad_token = tokenizer.eos_token
+            if tokenizer.pad_token_id is None:
+                raise ValueError("Tokenizer could not resolve pad_token_id from EOS")
+        return tokenizer

@@ -3,13 +3,13 @@
 name: grpo
 
 # GRPO-specific hyperparameters
-beta: 0.1  # Temperature for advantage computation
-temperature: 1.0  # Sampling temperature during rollout
+beta: 0.1  # KL penalty coefficient; 0 disables the KL term
+# Sampling temperature is configured in train.yaml under generation.temperature.
 group_size: 4  # Number of responses per prompt for group normalization
 
 # Loss configuration
 cliprange: 0.2  # Optional: clip ratio for importance sampling
-loss_normalization: "token"  # "token" | "sequence" | "none"
+loss_normalization: "token"  # "token" | "sequence"; core loss supports both reductions
 
 # Advantage estimation
-advantage_normalization: "group"  # "group" | "global" | "none"
+advantage_normalization: "group"  # Currently accepted: "group"
