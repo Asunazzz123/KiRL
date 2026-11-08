@@ -7,6 +7,7 @@ from typing import TypeAlias
 
 
 from .base import _BaseTrainer
+from ..datasets import BaseDataset
 from ..utils.logging import Log
 logger = Log.get_logger(__name__, algorithm="grpo", role="trainer")
 
@@ -17,7 +18,7 @@ class GRPOTrainer(_BaseTrainer):
         self,
         model: str,
         reward_fn: RewardFunc | list[RewardFunc] | None = None,
-        # train_dataset:
-        # eval_dataset:
+        train_dataset: BaseDataset | None = None,
+        eval_dataset: BaseDataset | None = None,
     ):
         ...
