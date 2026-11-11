@@ -2,15 +2,16 @@
 
 import warnings
 
-from collections.abc import Callable, Mapping
-from typing import TypeAlias, Any
+from collections.abc import Mapping
+from typing import Any
 from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizerBase
-from .base import _BaseTrainer
+from .base import _BaseTrainer, RewardFunc
+from ..engine.inference.base import GenerationBackend, GenerationConfig
+
 from ..datasets import BaseDataset
 from ..utils.logging import Log
 logger = Log.get_logger(__name__, algorithm="grpo", role="trainer")
 
-RewardFunc: TypeAlias = Callable[..., list[float | None]]
 
 
 
@@ -38,6 +39,7 @@ class GRPOTrainer(_BaseTrainer):
         eval_dataset: BaseDataset | None = None,
         *,
         args: TrainingArguments | None = None,
+        generation_backend: GenerationBackend | None = None,
         algo_config: Mapping[str, Any] | None = None,
         generation_config: Mapping[str, Any] | None = None,
         model_init_kwargs: dict[str,Any] | None = None,
@@ -74,9 +76,24 @@ class GRPOTrainer(_BaseTrainer):
             data_collator=data_collator
         )
         self._prepare_reference_policy()
-        self._setup_generation()
+        self._setup_generation(backend=generation_backend)
         self._initialize_rollout_state()
 
+
+    def _setup_generation(
+        self,
+        backend: GenerationBackend | None = None
+    ) -> None :
+        gc = self.generation_config
+        self._generation_config = GenerationConfig(
+            num_return_sequences=self.algo_config["group_size"],
+            max_new_tokens=gc["max_new_tokens"],
+            do_sample=gc["do_sample"],
+            temperature=gc["temperature"],
+            top_p=gc["top_p"],
+            return_logprobs=True,
+        )
+        self._generation_backend: GenerationBackend | None = backend
 
     @classmethod
     def _validate_config(
@@ -127,3 +144,8 @@ class GRPOTrainer(_BaseTrainer):
                 f"advantage_normalization={algo['advantage_normalization']!r} is not yet supported"
             )
         return args
+
+    
+
+    def grpo_loss():
+        ...

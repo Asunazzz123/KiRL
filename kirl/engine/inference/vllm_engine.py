@@ -5,7 +5,7 @@ from vllm import LLM, SamplingParams
 from vllm.inputs import TokensPrompt
 
 from .base import GenerationBackend, GenerationOutput
-from .vllm_config import GenerationConfig
+from .base import GenerationConfig
 
 class vLLMEngine(GenerationBackend):
     def __init__(

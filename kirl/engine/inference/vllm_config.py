@@ -1,6 +1,11 @@
-"""vllm inference backend"""
+"""vLLM-specific backend and profiler configuration."""
 
 from dataclasses import dataclass
+
+from .base import GenerationConfig  # re-exported for backward compatibility
+
+__all__ = ["VLLMBackendConfig", "GenerationConfig", "VLLMProfilerConfig"]
+
 
 @dataclass(frozen=True)
 class VLLMBackendConfig:
@@ -23,24 +28,6 @@ class VLLMBackendConfig:
     # 性能调优，可暂时沿用 vLLM 默认值
     max_num_seqs: int | None = None
     max_num_batched_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class GenerationConfig:
-    num_return_sequences: int = 1
-    max_new_tokens: int = 256
-
-    do_sample: bool = True
-    temperature: float = 1.0
-    top_p: float = 1.0
-    top_k: int = -1
-
-    stop: tuple[str, ...] = ()
-    stop_token_ids: tuple[int, ...] = ()
-    ignore_eos: bool = False
-
-    seed: int | None = None
-    return_logprobs: bool = False
 
 
 class VLLMProfilerConfig:

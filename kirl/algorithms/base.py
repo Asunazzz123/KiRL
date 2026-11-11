@@ -4,10 +4,10 @@ from __future__ import annotations
 import torch
 import math
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, TypeAlias
 from accelerate.utils import gather_object
 from transformers import (
     Trainer, TrainingArguments, PreTrainedModel, AutoModelForCausalLM,
@@ -15,6 +15,8 @@ from transformers import (
 )
 
 from ..utils.logging import Log
+
+RewardFunc: TypeAlias = Callable[..., "list[float | None]"]
 
 _DISTRIBUTED_PLATFORM = {
     "FSDP"
@@ -245,6 +247,21 @@ class _BaseTrainer(Trainer):
             raise ValueError(f"{name} must be finite")
         return value
 
+    @staticmethod
+    def _normalize_rewards(
+        reward_fn: "RewardFunc | list[RewardFunc] | None",
+    ) -> "list[RewardFunc]":
+        """Normalize reward_fn input to a non-empty list of callables."""
+        if reward_fn is None:
+            raise ValueError("reward_fn is required; pass at least one reward function")
+        funcs: list[RewardFunc] = [reward_fn] if callable(reward_fn) else list(reward_fn)
+        if not funcs:
+            raise ValueError("reward_fn must contain at least one function")
+        for i, fn in enumerate(funcs):
+            if not callable(fn):
+                raise TypeError(f"reward_fn[{i}] must be callable")
+        return funcs
+
     @classmethod
     def _validate_generation_config(cls, config: Mapping[str, Any]) -> None:
         """
@@ -312,3 +329,5 @@ class _BaseTrainer(Trainer):
             if tokenizer.pad_token_id is None:
                 raise ValueError("Tokenizer could not resolve pad_token_id from EOS")
         return tokenizer
+
+    
