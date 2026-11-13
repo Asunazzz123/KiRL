@@ -72,6 +72,8 @@ multirun/
 proxy.ps1
 proxy.sh
 
-
+# Agent
+.claude
+.codex
 
 

@@ -145,7 +145,13 @@ class GRPOTrainer(_BaseTrainer):
             )
         return args
 
-    
-
-    def grpo_loss():
+    def _initialize_rollout_state():
         ...
+
+    def grpo_loss(
+        self,
+        
+    ):
+        ...
+
+    

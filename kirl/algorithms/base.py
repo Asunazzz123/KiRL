@@ -15,6 +15,7 @@ from transformers import (
 )
 
 from ..utils.logging import Log
+from ..datasets import BaseDataset
 
 RewardFunc: TypeAlias = Callable[..., "list[float | None]"]
 
@@ -362,3 +363,11 @@ class _BaseTrainer(Trainer):
                 raise ValueError("Tokenizer could not resolve pad_token_id from EOS")
         return tokenizer
 
+    @staticmethod
+    def _validate_dataset(dataset: Any) -> None:
+        """Raise TypeError if dataset is neither a BaseDataset nor None."""
+        if dataset is not None and not isinstance(dataset, BaseDataset):
+            raise TypeError(
+                f"train_dataset must be a BaseDataset instance or None, "
+                f"got {type(dataset).__name__!r}"
+            )
