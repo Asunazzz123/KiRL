@@ -20,14 +20,14 @@ from ...utils.logging import Log
 class vLLMEngine(GenerationBackend):
     def __init__(self, engine: LLM) -> None:
         self._engine = engine
-        self._client: Any = None          # openai.OpenAI, populated by start_client
+        self._client: Any = None
         self._server_process: subprocess.Popen | None = None
         self._server_url: str | None = None
-        self.logger = Log.get_logger(__name__)
+        self.logger = Log.get_logger(__name__, role="inference")
 
     @classmethod
     def from_config(cls, config: VLLMBackendConfig) -> "vLLMEngine":
-        logger = Log.get_logger(__name__)
+        logger = Log.get_logger(__name__, role="inference")
         logger.info(
             "Initializing vLLM engine: model=%s tp=%d dtype=%s gpu_mem=%.2f",
             config.model, config.tensor_parallel_size, config.dtype,

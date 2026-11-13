@@ -1,6 +1,4 @@
 import torch
-
-
 import torch.distributed.fsdp as fsdp
 import torch.distributed as dist
 from torch.nn.parameter import UninitializedBuffer, UninitializedParameter
@@ -8,7 +6,10 @@ from dataclasses import dataclass
 from .fsdp_config import FSDPConfig
 from .context import DistributedContext
 from ..profiler.probe import NullProbe
+from ..utils.logging import Log
 from functools import partial
+
+logger = Log.get_logger(__name__, role="distributed")
 
 
 
@@ -24,13 +25,27 @@ class FSDPBackend:
         self.probe = probe if probe is not None else NullProbe()
 
 
-    def prepare_mode(self,model:torch.nn.Module, transformer_layer_cls):
-        self._validate_model(model,transformer_layer_cls)
+    def prepare_mode(self, model: torch.nn.Module, transformer_layer_cls):
+        self._validate_model(model, transformer_layer_cls)
         if self.config.mode == "FSDP":
-            self._prepare_fsdp1(model,transformer_layer_cls)
-
+            logger.info(
+                "Wrapping model with FSDP1 strategy=%s",
+                self.config.sharding_strategy,
+                extra={"event": "fsdp.wrap.start", "phase": "init"},
+            )
+            model = self._prepare_fsdp1(model, transformer_layer_cls)
         else:
-            self._prepare_fsdp2(model,transformer_layer_cls)
+            logger.info(
+                "Wrapping model with FSDP2 reshard_after_forward=%s",
+                self.config.reshard_after_forward,
+                extra={"event": "fsdp.wrap.start", "phase": "init"},
+            )
+            model = self._prepare_fsdp2(model, transformer_layer_cls)
+        logger.info(
+            "Model wrapped successfully",
+            extra={"event": "fsdp.wrap.done", "phase": "init"},
+        )
+        return model
 
 
     def _validate_model(self, model, transformer_layer_cls) -> None:

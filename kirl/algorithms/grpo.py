@@ -10,8 +10,7 @@ from .core_algo import compute_grpo_policy_loss
 from .base import _BaseTrainer, RewardFunc, RolloutData
 from ..engine.inference.base import GenerationBackend, GenerationConfig
 from ..datasets import BaseDataset, RLDataCollator
-from ..utils.logging import Log
-logger = Log.get_logger(__name__, algorithm="grpo", role="trainer")
+# from ..utils.logging import Log
 
 
 
@@ -172,7 +171,7 @@ class GRPOTrainer(_BaseTrainer):
             )
         self._current_rollout: RolloutData | None = None
         self._advantage_stats: dict[str, float] = {"mean": 0.0, "std": 1.0, "count": 0.0}
-        logger.info(
+        self.logger.info(
             "Rollout state initialized (group_size=%d, beta=%.4f)",
             self.algo_config["group_size"], self.algo_config["beta"],
             extra={"event": "grpo.rollout_state.init", "phase": "init", "step": 0},

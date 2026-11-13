@@ -60,6 +60,22 @@ class _BaseTrainer(Trainer):
     _name: ClassVar[str] = "Base"
     _tag_names: ClassVar[tuple[str, ...]] = ("kirl",)
     _paper: ClassVar[dict[str, str]] = {}
+    _cls_logger: ClassVar[Any] = None
+
+    @classmethod
+    def _get_cls_logger(cls):
+        """Lazy per-class logger for classmethods (e.g. ``_validate_config``).
+
+        Picks up ``cls._name`` dynamically so each subclass gets its own
+        algorithm tag without hardcoding. Cached on the subclass after first
+        call; instance logger (``self.logger``) supersedes this once ``__init__``
+        runs because it carries ``run_id`` and ``rank`` too.
+        """
+        if cls._cls_logger is None:
+            cls._cls_logger = Log.get_logger(
+                __name__, algorithm=cls._name.lower(), role="trainer"
+            )
+        return cls._cls_logger
 
     def __init__(self, *args: Any, run_id: str | None = None, probe=None, **kwargs: Any) -> None:
         # Allocate before Trainer initialization so subclass hooks can use it.
