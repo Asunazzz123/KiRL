@@ -34,3 +34,30 @@ class BaseDataset(Dataset):
         without changing the stored sample. Slices are intentionally unsupported.
         """
         return dict(self._samples[integer_index(index)])
+
+
+class RLDataCollator:
+    """Collate a batch of sample dicts into lists, leaving strings as strings.
+
+    HuggingFace Trainer's default collator tries to convert every field to a
+    tensor, which breaks string fields like ``prompt`` and ``solution``.  This
+    collator groups each field across the batch into a plain list so
+    ``compute_loss`` receives ``inputs["prompt"]`` and ``inputs["solution"]``
+    as ``list[str]``.
+
+    Tensor-valued fields are stacked normally so numeric fields (e.g.
+    ``input_ids`` added by a pre-tokenising step) still work.
+    """
+
+    def __call__(self, samples: list[dict[str, Any]]) -> dict[str, Any]:
+        if not samples:
+            return {}
+        import torch
+        batch: dict[str, Any] = {}
+        for key in samples[0]:
+            vals = [s[key] for s in samples]
+            if all(isinstance(v, torch.Tensor) for v in vals):
+                batch[key] = torch.stack(vals)
+            else:
+                batch[key] = vals
+        return batch

@@ -9,7 +9,7 @@ from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizer
 from .core_algo import compute_grpo_policy_loss
 from .base import _BaseTrainer, RewardFunc, RolloutData
 from ..engine.inference.base import GenerationBackend, GenerationConfig
-from ..datasets import BaseDataset
+from ..datasets import BaseDataset, RLDataCollator
 from ..utils.logging import Log
 logger = Log.get_logger(__name__, algorithm="grpo", role="trainer")
 
@@ -68,6 +68,8 @@ class GRPOTrainer(_BaseTrainer):
         )
         self.reward_funcs = self._normalize_rewards(reward_fn)
         self._validate_dataset(train_dataset)
+        if data_collator is None:
+            data_collator = RLDataCollator()
         super().__init__(
             model=model,
             args=args,

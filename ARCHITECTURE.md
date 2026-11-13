@@ -2,20 +2,21 @@
 
 ## Design Intent
 
-KiRL is an educational RL training engine designed to help understand:
-- Bottom-level design patterns in RL training systems
-- Module optimization opportunities
-- How to decouple algorithm logic from training/inference infrastructure
+KiRL is an educational RL training engine built on top of HuggingFace Transformers
+`Trainer`. It explores:
+- How to decouple algorithm logic (GRPO/PPO/DPO policy losses) from training infrastructure
+- How to separate online rollout generation (vLLM) from gradient-based policy updates
+- How FSDP/DDP sharding interacts with weight synchronization to an inference backend
 
 **Goals:**
-- Clean separation between algorithm, data, and infrastructure layers
-- Support multiple RL algorithms (PPO, GRPO, DPO) through pluggable modules
-- Multi-GPU training and inference with minimal boilerplate
+- Clean separation between algorithm, data, config, and inference layers
+- Pluggable algorithms and datasets via a name-based registry (no decorators, just a YAML whitelist + factory)
+- Multi-GPU training (FSDP/DDP via Accelerate) with TP-based inference (vLLM)
 
 **Non-goals:**
 - Production-scale performance optimization (verl already does this)
-- Complex distributed strategies beyond FSDP/DDP
-- Auto-tuning or hyperparameter search
+- A custom training loop — the loop is owned by Transformers `Trainer`
+- Complex distributed strategies beyond FSDP/DDP for training and TP for inference
 
 **Anti-goals:**
 - Monolithic design where adding a new algorithm requires modifying engine core
@@ -26,445 +27,316 @@ KiRL is an educational RL training engine designed to help understand:
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Training/Inference Pipeline               │
-│  (Orchestrates algorithm + data + engine for train/eval)    │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-        ┌────────────┼────────────┐
-        │            │            │
-        ▼            ▼            ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│  Algorithm   │ │   Dataset    │ │    Engine    │
-│   Module     │ │   Module     │ │     Core     │
-└──────────────┘ └──────────────┘ └──────────────┘
-│                │                │
-│ Pluggable     │ Pluggable      │ Manages:
-│ RL algos:     │ datasets:      │ - Model loading
-│ - GRPO        │ - GSM8K        │ - FSDP/DDP
-│ - PPO         │ - MATH         │ - Gradient sync
-│ - DPO         │ - Custom       │ - Checkpointing
-│                │                │
-│ Interface:    │ Interface:     │ Interface:
-│ - compute_    │ - load_raw_    │ - forward()
-│   advantages  │   data()       │ - backward()
-│ - compute_    │ - parse_       │ - generate()
-│   loss()      │   sample()     │ - save/load()
-│                │ - collate_fn() │
-│                │ - get_shard()  │
-└──────────────┘ └──────────────┘ └──────────────┘
+Hydra CLI / YAML config
+        │
+        ▼
+┌─────────────────────────────────────────────────────┐
+│  config/   resolve_train_config(cfg) → TrainConfig  │
+│  schema.py + adapters.py + registry.yaml            │
+└───────────┬─────────────────────────────────────────┘
+            │ TrainConfig { resolved, training_args,
+            │               algo_config, generation, rollout, ... }
+   ┌────────┼────────────────────────────────────────┐
+   │        │                                        │
+   ▼        ▼                                        ▼
+┌──────────────┐  ┌──────────────────────┐  ┌────────────────────┐
+│ datasets/    │  │ algorithms/          │  │ engine/inference/  │
+│ BaseDataset  │  │ _BaseTrainer(Trainer)│  │ vLLMEngine         │
+│ RLDataCollator│ │ GRPOTrainer          │  │ GenerationBackend  │
+│ build_dataset│  │ core_algo.py (losses)│  │ (ABC)              │
+└──────────────┘  └──────────────────────┘  └────────────────────┘
+                         │                          ▲
+                         │  generation_backend ─────┘
+                         │  update_weight ──────────►
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  distributed/  FSDPBackend + FSDPConfig (FSDP/FSDP2)│
+│  profiler/     TorchProfilerAdapter                 │
+│  utils/logging Log                                  │
+└─────────────────────────────────────────────────────┘
+```
+
+The training loop is owned by Transformers `Trainer`; KiRL customizes it by
+subclassing `_BaseTrainer(Trainer)` and overriding `compute_loss` /
+`training_step`. Rollout generation is delegated to a `GenerationBackend`
+(vLLM) that runs without gradients and is synchronized after each optimizer
+step.
+
+---
+
+## Layer 1: Config (`kirl/config/`)
+
+```
+schema.py          Hydra-compatible dataclasses (AlgoSchema, DatasetSchema, …)
+adapters.py        resolve_train_config() — validates + normalizes → TrainConfig
+registry.yaml      whitelist of allowed names per dimension
+```
+
+`resolve_train_config(cfg)` merges YAML into the structured schema, validates
+all numeric/enum constraints, resolves all paths to absolute, and returns a
+`TrainConfig` dataclass that the pipeline uses to construct runtime objects.
+No model or device is initialized here.
+
+`TrainConfig` fields:
+
+| Field | Type | Contents |
+|---|---|---|
+| `resolved` | `dict` | Full merged config including `dataset`, `reward`, etc. |
+| `training_args` | `dict` | kwargs for `TrainingArguments` constructor |
+| `algo_config` | `dict` | GRPO/PPO/DPO hyperparameters |
+| `generation_config` | `dict` | Raw generation params dict |
+| `generation` | `GenerationConfig` | Typed backend-agnostic sampling params |
+| `rollout` | `VLLMBackendConfig` | vLLM engine constructor args |
+| `profiler` | `ProfilerSettings` | Profiler config |
+
+Adding a new pluggable name: add it to `registry.yaml` only. `adapters.py`
+reads the YAML at import time; no Python changes are needed.
+
+---
+
+## Layer 2: Dataset (`kirl/datasets/`)
+
+```
+base.py        BaseDataset(torch.Dataset) + RLDataCollator
+factory.py     build_dataset(cfg, split) — name → loader
+gsm8k.py       load_gsm8k(path, prompt_template_path)
+math.py        (stub)
+custom.py      (stub)
+```
+
+**`BaseDataset`** stores samples as `list[dict]` and exposes the standard
+`__len__` / `__getitem__` interface. Each sample must be a `{str: Any}` dict.
+
+**`RLDataCollator`** replaces the HF default collator, which would try to
+stack string fields into tensors. It groups each field across the batch into a
+plain `list`; tensor-valued fields are `torch.stack`-ed normally.
+
+**`build_dataset(cfg, split)`** maps `cfg["name"]` through `_LOADERS` to the
+appropriate loader, then applies cross-cutting options (`max_samples`, `seed`).
+Returns `None` when the split path is not configured (eval split is optional).
+
+Standard sample keys produced by all loaders:
+
+| Key | Type | Description |
+|---|---|---|
+| `sample_id` | `str` | Unique sample identifier |
+| `prompt` | `str` | Input prompt (with optional template applied) |
+| `solution` | `str` | Reference answer for reward computation |
+
+---
+
+## Layer 3: Algorithm (`kirl/algorithms/`)
+
+```
+base.py        _BaseTrainer(Trainer) — shared infrastructure
+grpo.py        GRPOTrainer(_BaseTrainer)
+core_algo.py   compute_grpo_policy_loss, compute_ppo_policy_loss, compute_dpo_loss
+reward.py      math_accuracy_reward
+```
+
+### `_BaseTrainer`
+
+Provides infrastructure shared across all RL trainers:
+
+| Method | Role |
+|---|---|
+| `_resolve_model` | `str \| PreTrainedModel → PreTrainedModel` |
+| `_resolve_tokenizer` | Load + configure padding |
+| `_prepare_reference_policy` | deepcopy + freeze for KL (non-FSDP only) |
+| `_normalize_rewards` | `fn \| list[fn] → list[fn]` |
+| `_validate_dataset` | type check |
+| `_validate_config` | validate `TrainingArguments` |
+| `_iter_policy_params` | `yield (name, tensor)` FSDP-aware |
+| `store_metrics` | weighted accumulation buffer |
+| `log` | merge + cross-rank gather into Trainer pipeline |
+| `evaluate` | mode-switching wrapper |
+| `training_step` | `Log.bind` context wrapper |
+
+**`_iter_policy_params`** is the FSDP hook: under FSDP it enters
+`FSDP.summon_full_params(writeback=False)` before yielding, so the rollout
+backend receives complete, correctly-named weights. Under DDP/single-GPU it
+yields directly from `unwrap_model(model).named_parameters()`.
+
+### `GRPOTrainer`
+
+Training loop per step:
+
+```
+training_step (overridden)
+  └─ super().training_step          Log.bind + Trainer forward/backward/opt
+       └─ compute_loss
+            ├─ _run_rollout          tokenize → generate(G/prompt) →
+            │                        reward_funcs → group advantage normalise
+            ├─ policy forward        input_ids=[prompt‖completion] → log_probs [B*G,T]
+            ├─ reference forward     ref_log_probs [B*G,T]  (beta > 0 only)
+            └─ grpo_loss             clip surrogate + KL → (loss, metadata)
+  └─ _iter_policy_params
+       └─ update_weight              push weights to vLLM engine
+```
+
+**`_run_rollout`** returns `(RolloutData, advantages, completion_ids)`:
+- Tokenizes prompts, calls `GenerationBackend.generate` for `G` completions/prompt
+- Regroups `GenerationOutput` by `prompt_index`, right-pads to uniform length `T`
+- Decodes texts, calls each reward function, mean-aggregates (None-safe)
+- Group-normalises advantages: `A_i = (r_i − μ) / (σ + ε)` within each group of G
+
+**`grpo_loss`** delegates clipped surrogate to `compute_grpo_policy_loss` in
+`core_algo.py` and adds the KL term when `beta > 0`:
+
+```
+reduction  =  "token_mean" | "sequence_mean"   (from loss_normalization)
+loss       =  clip_surrogate + beta * mean(KL per sequence)
+```
+
+### `core_algo.py`
+
+Pure tensor functions with no trainer state:
+
+| Function | Use |
+|---|---|
+| `compute_grpo_policy_loss` | GRPO clipped surrogate, returns `(loss, metadata)` |
+| `compute_dr_grpo_policy_loss` | Dr.GRPO variant (length-normalised, no KL) |
+| `compute_ppo_policy_loss` | PPO-Clip actor loss |
+| `compute_ppo_value_loss` | PPO clipped critic loss |
+| `compute_dpo_loss` | Sigmoid DPO loss |
+
+---
+
+## Layer 4: Inference Backend (`kirl/engine/inference/`)
+
+```
+base.py         GenerationConfig, GenerationOutput, GenerationBackend(ABC)
+vllm_engine.py  vLLMEngine(GenerationBackend)
+vllm_config.py  VLLMBackendConfig
+```
+
+**`GenerationBackend`** ABC exposes a single method:
+
+```python
+def generate(
+    self,
+    prompt_token_ids: Sequence[Sequence[int]],
+    config: GenerationConfig,
+) -> list[GenerationOutput]:
+```
+
+**`vLLMEngine`** wraps a `vllm.LLM` instance. Key methods:
+
+| Method | Role |
+|---|---|
+| `from_config(config)` | `VLLMBackendConfig → vLLMEngine` |
+| `generate(...)` | Batched rollout, extracts per-token logprobs |
+| `update_weight(named_params)` | In-place weight sync via `model_runner.load_weights` |
+| `start_client(config, host, port)` | Launch vLLM OpenAI server subprocess, poll `/health` |
+| `client()` | Return active `openai.OpenAI` handle |
+| `close_client()` | Terminate server, release handle |
+
+Two deployment modes:
+
+```
+Embedded (default)        Server (client mode)
+────────────────          ────────────────────
+LLM + Trainer             vLLM subprocess  ◄──► Trainer via OpenAI API
+same process              separate process
+update_weight → direct    update_weight → HTTP (not yet implemented)
+from_config               start_client
 ```
 
 ---
 
-## Layer 1: Algorithm Module
+## Layer 5: Distributed (`kirl/distributed/`)
 
-### Design Principle
-**Algorithms should be pure functions that compute loss given rollout data.**
-
-### Base Interface
-```python
-class BaseAlgorithm:
-    algo: str = "base"  # Algorithm identifier for registry
-    
-    def compute_advantages(
-        self, 
-        rollout_data: RolloutData,
-        config: AlgoConfig
-    ) -> torch.Tensor:
-        """Compute advantages from rollout data.
-        
-        Args:
-            rollout_data: Contains rewards, log_probs, values, masks
-            config: Algorithm-specific hyperparameters
-            
-        Returns:
-            advantages: Shape [batch_size, seq_len]
-        """
-        raise NotImplementedError
-    
-    def compute_loss(
-        self,
-        advantages: torch.Tensor,
-        log_probs: torch.Tensor,
-        old_log_probs: torch.Tensor,
-        config: AlgoConfig
-    ) -> tuple[torch.Tensor, dict[str, Any]]:
-        """Compute policy loss and metrics.
-        
-        Returns:
-            loss: Scalar tensor for backward()
-            metrics: Dict of loggable metrics
-        """
-        raise NotImplementedError
+```
+fsdp_config.py    FSDPConfig — FSDP/FSDP2 hyperparameters + validation
+fsdp_backend.py   FSDPBackend — model wrapping, broadcast, optimizer offload
 ```
 
-### Registry Pattern
-```python
-ALGO_REGISTRY: dict[str, type[BaseAlgorithm]] = {}
+**`FSDPBackend.prepare_mode(model, transformer_layer_cls)`** wraps the model:
 
-@register_algorithm("grpo")
-class GRPOAlgorithm(BaseAlgorithm):
-    algo = "grpo"
-    
-    def compute_advantages(self, rollout_data, config):
-        # Group-based advantage estimation
-        ...
-    
-    def compute_loss(self, advantages, log_probs, old_log_probs, config):
-        # GRPO policy gradient loss
-        ...
-```
+- **FSDP1**: `transformer_auto_wrap_policy` + `ShardingStrategy` + `MixedPrecision`;
+  `use_orig_params=True` preserves parameter names through `summon_full_params`.
+- **FSDP2**: Manual `fully_shard` per transformer block (reversed order, innermost first),
+  then root; uses `MixedPrecisionPolicy`.
 
-### Key Decisions
-- **Algorithms DO NOT hold model parameters** (engine manages those)
-- **Algorithms DO hold their hyperparameters** (read from `config.grpo.*`)
-- **Algorithms are stateless** (no internal buffers; all state in rollout_data)
+Sharding unit is determined by `transformer_layer_cls` (e.g. `LlamaDecoderLayer`);
+the backend validates that at least one child module matches before wrapping.
+
+Weight sync to vLLM under FSDP goes through `_iter_policy_params` in
+`_BaseTrainer`, which uses `FSDP.summon_full_params(writeback=False)` to
+all-gather complete weights before passing them to `update_weight`.
 
 ---
 
-## Layer 2: Dataset Module
+## Multi-GPU Communication Pattern
 
-### Design Principle
-**Each dataset encapsulates its own loading and parsing logic, exposing a uniform interface to the engine.**
-
-### Base Interface
-```python
-class BaseDataset:
-    name: str = "base"
-    
-    def load_raw_data(self, split: str) -> list[dict]:
-        """Load raw dataset from disk/HF.
-        
-        Args:
-            split: "train" | "validation" | "test"
-            
-        Returns:
-            List of raw samples (JSON-like dicts)
-        """
-        raise NotImplementedError
-    
-    def parse_sample(self, raw_sample: dict) -> dict[str, Any]:
-        """Parse one raw sample into model input format.
-        
-        Returns:
-            Dict with keys like "prompt", "question", "ground_truth"
-        """
-        raise NotImplementedError
-    
-    def collate_fn(self, batch: list[dict]) -> dict[str, torch.Tensor]:
-        """Batch collation for DataLoader.
-        
-        Returns:
-            Dict with "input_ids", "attention_mask", etc.
-        """
-        raise NotImplementedError
-    
-    def get_shard(
-        self, 
-        data: list[dict], 
-        rank: int, 
-        world_size: int
-    ) -> list[dict]:
-        """Shard data for distributed training.
-        
-        Default: rank-based round-robin sharding
-        Can override for custom sharding strategies
-        """
-        return data[rank::world_size]
+```
+Training side (FSDP)                   Inference side (TP)
+─────────────────────                  ──────────────────
+Rank 0 ──┐                             GPU 0 ──┐
+Rank 1 ──┼─ all-gather params          GPU 1 ──┼─ tensor-parallel LLM
+Rank 2 ──┤  reduce-scatter grads       GPU 2 ──┤  (vLLM TP group)
+Rank 3 ──┘  per-rank opt step          GPU 3 ──┘
+         │                                      ▲
+         └── update_weight (summon) ────────────┘
+              after each opt step
 ```
 
-### Registry Pattern
-```python
-DATASET_REGISTRY: dict[str, type[BaseDataset]] = {}
-
-@register_dataset("gsm8k")
-class GSM8KDataset(BaseDataset):
-    name = "gsm8k"
-    
-    def load_raw_data(self, split):
-        return load_gsm8k_json(split)
-    
-    def parse_sample(self, raw_sample):
-        return {
-            "prompt": self.template.format(question=raw_sample["question"]),
-            "ground_truth": raw_sample["answer"]
-        }
-```
-
-### Key Decisions
-- **Dataset handles its own format** (JSON, HF datasets, CSV, etc.)
-- **Engine calls uniform interface** (`load_raw_data` → `parse_sample` → `collate_fn`)
-- **Sharding is handled by dataset** (via `get_shard`), but engine provides default implementation
+FSDP training and vLLM TP inference use independent GPU groups. The trainer
+calls `update_weight` once per optimizer step; under FSDP this requires
+`summon_full_params` to materialize parameters on every rank before the sync.
 
 ---
 
-## Layer 3: Engine Core
+## Configuration Flow
 
-### Design Principle
-**Engine manages model lifecycle, distributed communication, and gradient updates, but remains algorithm-agnostic.**
-
-### Core Responsibilities
-1. **Model Management**
-   - Load model from HF/local checkpoint
-   - Wrap with FSDP/DDP for distributed training
-   - Handle mixed-precision (bfloat16/float32)
-   - Apply gradient checkpointing
-
-2. **Distributed Communication**
-   - Initialize NCCL/Gloo process group
-   - Coordinate across ranks (all_reduce, all_gather, broadcast)
-   - Handle rank-specific initialization (seed, device placement)
-
-3. **Training Primitives**
-   - `forward(input_ids, attention_mask)` → logits
-   - `backward(loss)` → gradient computation + sync
-   - `step()` → optimizer step + lr scheduling
-   - `generate(input_ids, gen_config)` → rollout generation
-
-4. **Checkpoint Management**
-   - Save full model + optimizer state
-   - Save best checkpoint by metric
-   - Resume from checkpoint
-
-### Interface
-```python
-class KiRL:
-    def __init__(
-        self,
-        model_factory: Callable,
-        fsdp_config: FSDPConfig,
-        context: DistributedContext
-    ):
-        self.model = self._init_model(model_factory, fsdp_config)
-        self.optimizer = self._init_optimizer()
-        self.context = context
-    
-    def forward(
-        self, 
-        input_ids: torch.Tensor, 
-        attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Forward pass returning logits."""
-        ...
-    
-    def backward(self, loss: torch.Tensor):
-        """Backward pass with gradient accumulation."""
-        ...
-    
-    def step(self):
-        """Optimizer step with gradient clipping."""
-        ...
-    
-    def generate(
-        self, 
-        input_ids: torch.Tensor,
-        gen_config: GenerationConfig
-    ) -> RolloutResult:
-        """Generate responses for RL rollout."""
-        ...
-    
-    def save_checkpoint(self, path: Path, metadata: dict):
-        """Save model + optimizer state."""
-        ...
-    
-    def load_checkpoint(self, path: Path) -> dict:
-        """Load checkpoint and return metadata."""
-        ...
 ```
-
-### Key Decisions
-- **Engine does NOT know about algorithms** (receives loss, computes gradients)
-- **Engine does NOT know about datasets** (receives batched tensors)
-- **FSDP vs DDP is a configuration choice**, not hard-coded
-
----
-
-## Layer 4: Training/Inference Pipeline
-
-### Design Principle
-**Pipeline orchestrates the three modules (algorithm + data + engine) to execute training/evaluation loops.**
-
-### Training Loop Pseudocode
-```python
-def train_loop(config):
-    # Initialize modules
-    algo = ALGO_REGISTRY[config.algo](config.algo_config)
-    dataset = DATASET_REGISTRY[config.dataset](config.data_config)
-    engine = KiRL(model_factory, fsdp_config, context)
-    
-    # Prepare data
-    train_data = dataset.load_raw_data("train")
-    local_data = dataset.get_shard(train_data, rank, world_size)
-    
-    for step in range(num_steps):
-        # 1. Sample prompts
-        prompts = sample_batch(local_data, batch_size)
-        
-        # 2. Generate rollouts (inference mode)
-        rollout = engine.generate(prompts, gen_config)
-        
-        # 3. Compute rewards (external reward model)
-        rewards = reward_fn(rollout.responses, prompts)
-        
-        # 4. Algorithm computes advantages and loss
-        advantages = algo.compute_advantages(
-            RolloutData(rewards, rollout.log_probs, ...), 
-            config.algo_config
-        )
-        loss, metrics = algo.compute_loss(
-            advantages, 
-            rollout.log_probs, 
-            rollout.old_log_probs,
-            config.algo_config
-        )
-        
-        # 5. Engine performs backward and optimizer step
-        engine.backward(loss)
-        if (step + 1) % grad_accum_steps == 0:
-            engine.step()
-        
-        # 6. Logging and checkpointing
-        if step % eval_interval == 0:
-            metrics = evaluate(engine, dataset, algo, config)
-            log_metrics(metrics)
-            engine.save_checkpoint(f"step_{step}.pt", metrics)
-```
-
-### Inference/Evaluation Loop
-```python
-def evaluate(engine, dataset, algo, config):
-    eval_data = dataset.load_raw_data("validation")
-    local_data = dataset.get_shard(eval_data, rank, world_size)
-    
-    all_rewards = []
-    for batch in batches(local_data):
-        rollout = engine.generate(batch, gen_config)
-        rewards = reward_fn(rollout.responses, batch)
-        all_rewards.extend(rewards)
-    
-    # Aggregate across ranks
-    mean_reward = context.all_reduce(sum(all_rewards)) / len(eval_data)
-    return {"mean_reward": mean_reward}
+configs/algo/grpo.yaml
+        │
+        ▼ (Hydra compose)
+resolve_train_config(cfg)
+        │
+        ├─ TrainConfig.training_args  → TrainingArguments(...)
+        ├─ TrainConfig.algo_config    → GRPOTrainer(algo_config=...)
+        ├─ TrainConfig.generation     → vLLMEngine._generation_config
+        ├─ TrainConfig.rollout        → vLLMEngine.from_config(...)
+        └─ TrainConfig.resolved["dataset"] → build_dataset(cfg, split)
 ```
 
 ---
 
-## Multi-GPU Scheduling
+## Extending KiRL
 
-### Data Parallelism
-- Each rank processes a different shard of the dataset
-- Sharding done by `dataset.get_shard(rank, world_size)`
-- All ranks must have same local batch size (padding handled in `get_shard`)
+### Add a new algorithm
+1. Add name to `registry.yaml` under `algo:`
+2. Implement pure loss function in `core_algo.py`
+3. Subclass `_BaseTrainer`, override `compute_loss` (and `_run_rollout` if online)
 
-### Model Parallelism (FSDP)
-- Model parameters sharded across GPUs
-- Forward: all-gather parameters, compute, discard
-- Backward: all-gather parameters, compute grads, reduce-scatter
-- Optimizer step: each rank updates its shard
+### Add a new dataset
+1. Add name to `registry.yaml` under `dataset:`
+2. Write a loader function `load_<name>(path, **kwargs) → BaseDataset`
+3. Add a `lambda cfg, split: ...` entry to `_LOADERS` in `factory.py`
 
-### Communication Pattern
-```
-Rank 0: data[0::4]  ──┐
-Rank 1: data[1::4]  ──┼─→ FSDP forward/backward ──→ all-reduce gradients
-Rank 2: data[2::4]  ──┤
-Rank 3: data[3::4]  ──┘
-```
-
-### Key Implementation Notes
-1. **NCCL backend required** for efficient GPU-GPU communication
-2. **Determinism**: Set `CUBLAS_WORKSPACE_CONFIG`, `torch.use_deterministic_algorithms(True)`
-3. **Gradient accumulation**: Only sync gradients every N steps to reduce communication overhead
-4. **Mixed precision**: Use `torch.autocast` with bfloat16 for forward/backward, keep optimizer in fp32
-
----
-
-## Critical Design Choices
-
-### 1. Why Registry Pattern Over Inheritance-Only?
-- **Pro**: Easy to add new algorithms without modifying engine code
-- **Pro**: Clear separation of concerns (algorithm logic vs. infrastructure)
-- **Con**: Slightly more boilerplate (decorators)
-
-**Decision**: Registry + Base Class (best of both worlds)
-
-### 2. Why Dataset Handles Sharding?
-- **Pro**: Some datasets need custom sharding (e.g., grouped by task)
-- **Pro**: Engine stays simple (just calls `get_shard`)
-- **Con**: Every dataset must implement `get_shard`
-
-**Decision**: Provide default implementation in `BaseDataset`, allow override
-
-### 3. Why Separate `compute_advantages` and `compute_loss`?
-- **Pro**: Some algorithms (GRPO) compute advantages offline, others (PPO) inline
-- **Pro**: Easier to debug (can inspect advantages before loss)
-- **Con**: Two methods to implement per algorithm
-
-**Decision**: Keep separate for flexibility
-
-### 4. Why Not Use Existing Libraries (e.g., Accelerate, DeepSpeed)?
-- **Pro**: Would reduce boilerplate
-- **Con**: Hides implementation details (defeats educational purpose)
-
-**Decision**: Implement FSDP wrapper manually, reference verl/Transformers for best practices
-
----
-
-## Optimization Opportunities (Educational Focus)
-
-After building the baseline, KiRL should make it easy to explore:
-
-1. **Gradient Accumulation Scheduling**
-   - How many microbatches before sync?
-   - Trade-off: memory vs. communication overhead
-
-2. **Mixed Precision Strategies**
-   - Autocast vs. manual casting
-   - When to upcast to fp32 (e.g., loss computation, normalization)
-
-3. **Checkpoint Strategies**
-   - Gradient checkpointing: memory vs. recomputation
-   - Selective activation checkpointing (transformer blocks only)
-
-4. **Communication Overlap**
-   - Overlap all-reduce with backward pass
-   - Bucket gradients for fewer communication calls
-
-5. **Dataset Preprocessing**
-   - Pre-tokenize vs. tokenize-on-the-fly
-   - Caching strategies for large datasets
-
-6. **Generation Optimization**
-   - vLLM integration for faster rollout generation
-   - Separate generation pool vs. inline generation
+### Add a new reward function
+1. Add name to `registry.yaml` under `reward:`
+2. Implement `fn(completions, solution, ...) -> list[float | None]` in `reward.py`
 
 ---
 
 ## Constraints
 
-1. **Python 3.10+** (for match/case, better type hints)
-2. **PyTorch 2.0+** (for FSDP2, torch.compile support)
-3. **Single-node multi-GPU focus** (8 GPUs max)
-4. **Hydra for configuration** (match verl conventions)
-5. **No custom CUDA kernels** (keep implementation readable)
-
----
-
-## Success Criteria
-
-KiRL is successful if:
-- [ ] A new algorithm can be added in <100 lines (just the algo class)
-- [ ] A new dataset can be added in <150 lines (just the dataset class)
-- [ ] Training loop code is <300 lines (pipeline orchestration)
-- [ ] Switching from DDP to FSDP requires changing 1 config line
-- [ ] Multi-GPU training matches single-GPU results (determinism check)
-- [ ] Code is readable by someone learning RL systems (extensive comments)
+1. **Python 3.11+** (union types, `typing.Self`)
+2. **PyTorch 2.2+** (FSDP2 `fully_shard`, `torch.compile` support)
+3. **Single-node multi-GPU focus** (8 GPUs max for training)
+4. **Hydra for configuration** — `register_configs()` must be called before compose
+5. **No custom CUDA kernels** — keep implementation readable
+6. **HuggingFace Trainer owns the loop** — KiRL hooks in via `compute_loss` / `training_step`
 
 ---
 
 ## References
 
-- **verl**: Main reference for algorithm implementations and best practices
-- **assignment5/fsdp_grpo.py**: Reference for FSDP wrapper and data sharding
-- **PyTorch FSDP tutorial**: https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html
-- **Transformers Trainer**: Reference for checkpoint management and logging
+- **verl**: Main reference for algorithm implementations and distributed patterns
+- **HuggingFace TRL**: Reference for `compute_loss` integration and reward shaping
+- **PyTorch FSDP docs**: https://pytorch.org/docs/stable/fsdp.html
+- **vLLM docs**: https://docs.vllm.ai/en/stable/
+
