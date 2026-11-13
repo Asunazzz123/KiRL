@@ -71,7 +71,7 @@ class vLLMEngine(GenerationBackend):
             logprobs=0 if config.return_logprobs else None,
         )
 
-
+    
     def generate(
         self,
         prompt_token_ids: Sequence[Sequence[int]],
