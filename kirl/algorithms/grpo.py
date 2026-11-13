@@ -10,7 +10,7 @@ from .core_algo import compute_grpo_policy_loss
 from .base import _BaseTrainer, RewardFunc, RolloutData
 from ..engine.inference.base import GenerationBackend, GenerationConfig
 from ..datasets import BaseDataset, RLDataCollator
-# from ..utils.logging import Log
+from ..utils.logging import Log
 
 
 
