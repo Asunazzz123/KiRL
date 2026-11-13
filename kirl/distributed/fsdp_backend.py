@@ -33,7 +33,7 @@ class FSDPBackend:
             self._prepare_fsdp2(model,transformer_layer_cls)
 
 
-    def _validate_model(model,transformer_layer_cls) -> None:
+    def _validate_model(self, model, transformer_layer_cls) -> None:
         if not isinstance(model,torch.nn.Module):
             raise TypeError("Model must be torch.nn.Module")
 
@@ -156,14 +156,12 @@ class FSDPBackend:
                 *model.named_parameters(),
                 *model.named_buffers()
             ]
-            for name, tensor in sorted(states,key = lambda item: item[0]):
+            for name, tensor in sorted(states, key=lambda item: item[0]):
                 if tensor.layout != torch.strided:
                     raise ValueError(f"Unsupported sparse state: {name}")
-
-                contiguous = tensor.countiguous()
-                dist.broadcast(contiguous,src=0)
                 if not tensor.is_contiguous():
-                    tensor.copy_(contiguous)
+                    tensor.data = tensor.contiguous()
+                dist.broadcast(tensor, src=0)
         mesh = init_device_mesh(
             "cuda",
             (self.context.world_size,),
@@ -198,12 +196,12 @@ class FSDPBackend:
         return model
 
 @torch.no_grad()
-def offload_fsdp_optimizer(optimizer,device_id):
+def offload_fsdp_optimizer(optimizer, device_id):
     if not optimizer:
         return
-    for param_group in optimizer.param_group:
+    for param_group in optimizer.param_groups:
         for param in param_group["params"]:
-            state = optimizer.state(param)
-        for key,value in state.items():
-            if isinstance(value, torch.Tensor):
+            state = optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
                     state[key] = value.to(device_id, non_blocking=True)

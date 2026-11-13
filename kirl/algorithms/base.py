@@ -138,6 +138,21 @@ class _BaseTrainer(Trainer):
             extra={"event": "reference_policy.ready", "phase": "init", "step": 0},
         )
 
+    def _iter_policy_params(self):
+        """Yield (name, tensor) pairs of the full, named policy parameters.
+
+        Under FSDP, summons complete params across ranks before yielding and
+        releases the all-gather on exit. Under DDP and single-GPU the unwrapped
+        model's named_parameters() already holds complete weights.
+        """
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        if self.is_fsdp_enabled:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            with FSDP.summon_full_params(unwrapped, writeback=False):
+                yield from unwrapped.named_parameters()
+        else:
+            yield from unwrapped.named_parameters()
+
     def training_step(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Attach update context without changing Trainer's loss/backward logic."""
         with Log.bind(**self._logging_context, phase="update", step=self.state.global_step):

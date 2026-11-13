@@ -75,7 +75,7 @@ class FSDPConfig:
                 "NO_SHARD"
             ):
                 raise ValueError(
-                    "Unsupported sharding strategy: f{self.sharding_stratergy!r}"
+                    f"Unsupported sharding strategy: {self.sharding_strategy!r}"
                 )
         else:
             if self.sharding_strategy is not None:

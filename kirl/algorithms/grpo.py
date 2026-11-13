@@ -229,16 +229,9 @@ class GRPOTrainer(_BaseTrainer):
         return loss, metadata
 
     def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
-        """Run a Trainer step and sync updated weights to the rollout backend.
-
-        Overrides the base ``training_step`` to push the latest policy
-        parameters to the vLLM engine after each optimizer update, keeping
-        rollout and training weights in sync.
-        """
+        """Run a Trainer step and sync updated weights to the rollout backend."""
         loss = super().training_step(model, inputs, num_items_in_batch)
-        self._generation_backend.update_weight(
-            self.accelerator.unwrap_model(model).named_parameters()
-        )
+        self._generation_backend.update_weight(self._iter_policy_params())
         return loss
 
     def _run_rollout(
