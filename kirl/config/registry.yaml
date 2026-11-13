@@ -1,0 +1,8 @@
+# Registered module names for each pluggable dimension.
+# Add a new entry here (plus the corresponding implementation) to extend the system.
+# adapters.py reads this file at import time; no Python changes are needed for new names.
+algo:    [grpo, ppo, dpo]
+engine:  [ddp, fsdp]
+dataset: [gsm8k, math]
+rollout: [vllm]
+reward:  [gsm8k_reward, math_reward, external_model]

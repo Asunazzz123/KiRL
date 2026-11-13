@@ -146,22 +146,48 @@ deterministic: true
 
 ## Adding New Components
 
+KiRL uses a YAML registry (`kirl/config/registry.yaml`) as the single source of
+truth for supported pluggable names. `resolve_train_config` reads it at import
+time, so the validation whitelist stays in sync automatically — no Python changes
+are needed in `adapters.py` when adding a new name.
+
+```yaml
+# kirl/config/registry.yaml
+algo:    [grpo, ppo, dpo]       # add your new algo name here
+engine:  [ddp, fsdp]
+dataset: [gsm8k, math]          # add your new dataset name here
+rollout: [vllm]
+reward:  [gsm8k_reward, math_reward, external_model]
+```
+
 ### New Algorithm
-1. Create `kirl/algorithms/your_algo.py`
-2. Inherit from `BaseAlgorithm` and implement:
-   - `compute_advantages()`
-   - `compute_loss()`
-3. Register with `@register_algorithm("your_algo")`
-4. Add config to `configs/algo/your_algo.yaml`
+
+1. Add the algorithm name to `registry.yaml` under `algo`.
+2. Create `kirl/algorithms/your_algo.py` and implement the trainer, inheriting
+   from `_BaseTrainer`.  Optionally register a config sentinel via the
+   `algorithms` registry:
+
+   ```python
+   # kirl/algorithms/your_algo.py
+   from dataclasses import dataclass
+   from kirl.algorithms import register_algo
+
+   @register_algo("your_algo")
+   @dataclass(frozen=True)
+   class YourAlgoConfig:
+       name: str = "your_algo"
+       cliprange: float = 0.2
+       # ... algo-specific fields
+   ```
+
+3. Add a Hydra config to `configs/algo/your_algo.yaml` and reference it in the
+   experiment defaults.
 
 ### New Dataset
-1. Create `kirl/datasets/your_dataset.py`
-2. Inherit from `BaseDataset` and implement:
-   - `load_raw_data()`
-   - `parse_sample()`
-   - (Optional) `collate_fn()`, `get_shard()`
-3. Register with `@register_dataset("your_dataset")`
-4. Add config to `configs/dataset/your_dataset.yaml`
+
+1. Add the dataset name to `registry.yaml` under `dataset`.
+2. Create `kirl/datasets/your_dataset.py` and implement the dataset class.
+3. Add a Hydra config to `configs/dataset/your_dataset.yaml`.
 
 ## Implementation Status
 

@@ -1,10 +1,19 @@
 # KiRL Training Configuration
 
 defaults:
+  - train_schema
   - algo: grpo
   - dataset: gsm8k
   - engine: fsdp
   - profiler: default
+  - rollout: vllm
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${output_dir}/${now:%Y-%m-%d}/${now:%H-%M-%S-%f}
 
 # Training parameters
 num_steps: 1000
@@ -32,7 +41,8 @@ eval_examples: 500
 # Checkpointing
 output_dir: "./outputs"
 save_interval: 500
-best_checkpoint_dir: "./checkpoints/best"
+# Relative artifact paths are resolved beneath this run's output directory.
+best_checkpoint_dir: "checkpoints/best"
 
 # Reproducibility
 seed: 42

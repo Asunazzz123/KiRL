@@ -80,6 +80,7 @@ class _BaseTrainer(Trainer):
         self.logger = Log.get_logger(__name__, **self._logging_context)
         if hasattr(self.model, "add_model_tags"):
             self.model.add_model_tags(list(self._tag_names))
+        self.reference_model: PreTrainedModel | None = None
         self._telemetry()
 
     def _telemetry(self) -> dict[str, Any]:
@@ -104,6 +105,37 @@ class _BaseTrainer(Trainer):
                 extra={"event": "trainer.initialized", "phase": "init", "step": self.state.global_step},
             )
         return metadata
+
+    def _prepare_reference_policy(self) -> None:
+        """Create a frozen copy of self.model for KL / implicit-reward computation.
+
+        Non-distributed and DDP: deepcopy the unwrapped model, freeze parameters,
+        and move to the accelerator device.
+
+        FSDP / DeepSpeed: deepcopy is unsafe on sharded flat params; raises
+        NotImplementedError until the distributed path is implemented.
+
+        Callers that do not need a reference model (e.g. beta=0) should
+        simply skip calling this method; self.reference_model stays None.
+        """
+        if self.is_fsdp_enabled or self.is_deepspeed_enabled:
+            raise NotImplementedError(
+                "Reference policy under FSDP/DeepSpeed is not yet implemented. "
+                "Override _prepare_reference_policy_sharded, or set beta=0 to skip."
+            )
+        import copy
+        # Unwrap to get the base PreTrainedModel before accelerator wrapping.
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        ref = copy.deepcopy(unwrapped)
+        ref.eval()
+        for p in ref.parameters():
+            p.requires_grad_(False)
+        ref = ref.to(self.accelerator.device)
+        self.reference_model = ref
+        self.logger.info(
+            "Reference policy ready (deepcopy, frozen)",
+            extra={"event": "reference_policy.ready", "phase": "init", "step": 0},
+        )
 
     def training_step(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Attach update context without changing Trainer's loss/backward logic."""
@@ -330,4 +362,3 @@ class _BaseTrainer(Trainer):
                 raise ValueError("Tokenizer could not resolve pad_token_id from EOS")
         return tokenizer
 
-    

@@ -1,0 +1,10 @@
+# This budget must be chosen for the intended training/inference placement.
+backend: vllm
+gpu_memory_utilization: 0.4
+tensor_parallel_size: 1
+max_model_len: null
+max_num_seqs: null
+max_num_batched_tokens: null
+enable_sleep_mode: false
+enforce_eager: false
+trust_remote_code: false

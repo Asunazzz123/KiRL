@@ -5,7 +5,7 @@ global:
   all_ranks: false
   sample_every_steps: 100
   trace_iterations: []
-  output_dir: ./outputs/profile
+  output_dir: profile  # Relative to the run output directory in the training adapter.
   flush_interval_seconds: 5.0
   max_pending_records: 1024
   batch_size: 64
