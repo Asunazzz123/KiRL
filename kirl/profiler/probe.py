@@ -65,11 +65,15 @@ class NullProbe:
 
 
 class Probe:
-    """Use create_probe() for rank gating. Does not synchronize GPUs or ranks.
+    """Observe one worker's stages, metrics, and trace windows.
 
-    stage() measures host wall time, never claims GPU completion. An iteration
-    window includes profiler start/stop/export overhead; nested stage times are
-    not additive. Values must already be CPU Python values.
+    Use ``create_probe()`` for mode/rank gating. All contexts share this instance:
+    - ``with probe``: close outputs on exit.
+    - ``with probe.iteration(i)``: set the iteration ID and control trace capture.
+    - ``with probe.stage(name)``: bind the stage name and record host wall time.
+
+    No GPU/rank synchronization is performed. Iteration timing includes capture
+    overhead; nested timings are not additive. Metrics require CPU Python values.
     """
     enabled = True
 

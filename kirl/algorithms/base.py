@@ -16,8 +16,10 @@ from transformers import (
 
 from ..utils.logging import Log
 from ..datasets import BaseDataset
+from ..profiler import NullProbe, Probe
 
 RewardFunc: TypeAlias = Callable[..., "list[float | None]"]
+
 
 _DISTRIBUTED_PLATFORM = {
     "FSDP"
@@ -77,12 +79,16 @@ class _BaseTrainer(Trainer):
             )
         return cls._cls_logger
 
-    def __init__(self, *args: Any, run_id: str | None = None, probe=None, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, run_id: str | None = None, probe: Probe | NullProbe | None = None , **kwargs: Any) -> None:
         # Allocate before Trainer initialization so subclass hooks can use it.
         self._metrics: dict[str, dict[str, tuple[float, float]]] = {
             "train": {},
             "eval": {},
         }
+        # Probe Hook
+        self._probe: Probe | NullProbe = (
+            probe if probe is not None else NullProbe()
+        )
         self._evaluating = False
         super().__init__(*args, **kwargs)
         # A supplied Probe remains owned/closed by the caller. Reuse its run ID
@@ -172,7 +178,8 @@ class _BaseTrainer(Trainer):
     def training_step(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Attach update context without changing Trainer's loss/backward logic."""
         with Log.bind(**self._logging_context, phase="update", step=self.state.global_step):
-            return super().training_step(*args, **kwargs)
+            with self._probe.step("train.microstep"):
+                return super().training_step(*args, **kwargs)
 
     def store_metrics(
         self,

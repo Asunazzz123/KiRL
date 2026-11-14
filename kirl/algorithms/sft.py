@@ -9,7 +9,7 @@ from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizer
 from .base import _BaseTrainer
 from ..datasets import BaseDataset
 from ..utils.logging import Log
-
+from ..profiler.probe import Probe, NullProbe
 
 class SFTTrainer(_BaseTrainer):
     """Supervised fine-tuning trainer built on ``_BaseTrainer``.
@@ -30,6 +30,7 @@ class SFTTrainer(_BaseTrainer):
         train_dataset: BaseDataset | None = None,
         eval_dataset: BaseDataset | None = None,
         *,
+        probe: Probe | NullProbe | None = None,
         args: TrainingArguments | None = None,
         algo_config: Mapping[str, Any] | None = None,
         model_init_kwargs: dict[str, Any] | None = None,
@@ -65,6 +66,7 @@ class SFTTrainer(_BaseTrainer):
             eval_dataset=eval_dataset,
             processing_class=tokenizer,
             data_collator=data_collator,
+            probe=probe
         )
 
     @classmethod

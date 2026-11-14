@@ -11,8 +11,7 @@ from .base import _BaseTrainer, RewardFunc, RolloutData
 from ..engine.inference.base import GenerationBackend, GenerationConfig
 from ..datasets import BaseDataset, RLDataCollator
 from ..utils.logging import Log
-
-
+from ..profiler.probe import NullProbe, Probe
 
 
 
@@ -38,6 +37,7 @@ class GRPOTrainer(_BaseTrainer):
         train_dataset: BaseDataset | None = None,
         eval_dataset: BaseDataset | None = None,
         *,
+        probe: Probe | NullProbe | None = None,
         args: TrainingArguments | None = None,
         generation_backend: GenerationBackend | None = None,
         algo_config: Mapping[str, Any] | None = None,
@@ -75,7 +75,8 @@ class GRPOTrainer(_BaseTrainer):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             processing_class=tokenizer,
-            data_collator=data_collator
+            data_collator=data_collator,
+            probe=probe
         )
         self._prepare_reference_policy()
         self._setup_generation(backend=generation_backend)

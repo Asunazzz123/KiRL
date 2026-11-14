@@ -13,15 +13,17 @@ from .base import GenerationBackend, GenerationOutput, GenerationConfig
 from .vllm_config import VLLMBackendConfig
 
 from ...utils.logging import Log
-from ...profiler.probe import NullProbe
+from ...profiler.probe import NullProbe, Probe
 
 
 
 
 class vLLMEngine(GenerationBackend):
-    def __init__(self, engine: LLM, *, probe=None) -> None:
+    def __init__(self, engine: LLM, *, probe: NullProbe | Probe | None=None) -> None:
         self._engine = engine
-        self._probe = probe if probe is not None else NullProbe()
+        self._probe = Probe | NullProbe = (
+                probe if probe is not None else NullProbe()
+            )
         self._client: Any = None
         self._server_process: subprocess.Popen | None = None
         self._server_url: str | None = None
@@ -55,7 +57,7 @@ class vLLMEngine(GenerationBackend):
             extra={"event": "vllm.ready", "phase": "init"},
         )
         return cls(engine, probe=probe)
-    
+
 
 
     @staticmethod
@@ -73,7 +75,7 @@ class vLLMEngine(GenerationBackend):
             logprobs=0 if config.return_logprobs else None,
         )
 
-    
+
     def generate(
         self,
         prompt_token_ids: Sequence[Sequence[int]],
@@ -145,7 +147,7 @@ class vLLMEngine(GenerationBackend):
         return results
 
 
-    
+
 
     def update_weight(
         self,
