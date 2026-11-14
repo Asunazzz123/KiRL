@@ -27,24 +27,25 @@ class FSDPBackend:
 
     def prepare_mode(self, model: torch.nn.Module, transformer_layer_cls):
         self._validate_model(model, transformer_layer_cls)
-        if self.config.mode == "FSDP":
+        with self.probe.stage("fsdp.wrap"):
+            if self.config.mode == "FSDP":
+                logger.info(
+                    "Wrapping model with FSDP1 strategy=%s",
+                    self.config.sharding_strategy,
+                    extra={"event": "fsdp.wrap.start", "phase": "init"},
+                )
+                model = self._prepare_fsdp1(model, transformer_layer_cls)
+            else:
+                logger.info(
+                    "Wrapping model with FSDP2 reshard_after_forward=%s",
+                    self.config.reshard_after_forward,
+                    extra={"event": "fsdp.wrap.start", "phase": "init"},
+                )
+                model = self._prepare_fsdp2(model, transformer_layer_cls)
             logger.info(
-                "Wrapping model with FSDP1 strategy=%s",
-                self.config.sharding_strategy,
-                extra={"event": "fsdp.wrap.start", "phase": "init"},
+                "Model wrapped successfully",
+                extra={"event": "fsdp.wrap.done", "phase": "init"},
             )
-            model = self._prepare_fsdp1(model, transformer_layer_cls)
-        else:
-            logger.info(
-                "Wrapping model with FSDP2 reshard_after_forward=%s",
-                self.config.reshard_after_forward,
-                extra={"event": "fsdp.wrap.start", "phase": "init"},
-            )
-            model = self._prepare_fsdp2(model, transformer_layer_cls)
-        logger.info(
-            "Model wrapped successfully",
-            extra={"event": "fsdp.wrap.done", "phase": "init"},
-        )
         return model
 
 

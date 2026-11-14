@@ -13,20 +13,22 @@ from .base import GenerationBackend, GenerationOutput, GenerationConfig
 from .vllm_config import VLLMBackendConfig
 
 from ...utils.logging import Log
+from ...profiler.probe import NullProbe
 
 
 
 
 class vLLMEngine(GenerationBackend):
-    def __init__(self, engine: LLM) -> None:
+    def __init__(self, engine: LLM, *, probe=None) -> None:
         self._engine = engine
+        self._probe = probe if probe is not None else NullProbe()
         self._client: Any = None
         self._server_process: subprocess.Popen | None = None
         self._server_url: str | None = None
         self.logger = Log.get_logger(__name__, role="inference")
 
     @classmethod
-    def from_config(cls, config: VLLMBackendConfig) -> "vLLMEngine":
+    def from_config(cls, config: VLLMBackendConfig, *, probe=None) -> "vLLMEngine":
         logger = Log.get_logger(__name__, role="inference")
         logger.info(
             "Initializing vLLM engine: model=%s tp=%d dtype=%s gpu_mem=%.2f",
@@ -52,7 +54,7 @@ class vLLMEngine(GenerationBackend):
             "vLLM engine ready",
             extra={"event": "vllm.ready", "phase": "init"},
         )
-        return cls(engine)
+        return cls(engine, probe=probe)
     
 
 
@@ -83,62 +85,63 @@ class vLLMEngine(GenerationBackend):
         if len(prompt_token_ids) == 0:
             return []
 
-        self.logger.debug(
-            "generate: prompts=%d n=%d max_tokens=%d",
-            len(prompt_token_ids), config.num_return_sequences, config.max_new_tokens,
-            extra={"event": "vllm.generate.start", "phase": "rollout",
-                   "num_prompts": len(prompt_token_ids)},
-        )
-        start = time.monotonic()
-        prompts = [
-            TokensPrompt(prompt_token_ids=list(token_ids))
-            for token_ids in prompt_token_ids
-        ]
-        sampling_params = self._to_sampling_params(config)
+        with self._probe.stage("rollout"):
+            self.logger.debug(
+                "generate: prompts=%d n=%d max_tokens=%d",
+                len(prompt_token_ids), config.num_return_sequences, config.max_new_tokens,
+                extra={"event": "vllm.generate.start", "phase": "rollout",
+                       "num_prompts": len(prompt_token_ids)},
+            )
+            start = time.monotonic()
+            prompts = [
+                TokensPrompt(prompt_token_ids=list(token_ids))
+                for token_ids in prompt_token_ids
+            ]
+            sampling_params = self._to_sampling_params(config)
 
-        requests = self._engine.generate(
-            prompts=prompts,
-            sampling_params=sampling_params,
-            use_tqdm=False,
-        )
+            requests = self._engine.generate(
+                prompts=prompts,
+                sampling_params=sampling_params,
+                use_tqdm=False,
+            )
 
-        results = []
-        for prompt_index, request in enumerate(requests):
-            for completion in request.outputs:
-                log_probs = None
-                if config.return_logprobs:
-                    token_logprobs = completion.logprobs
-                    if (
-                        token_logprobs is None
-                        or len(token_logprobs) != len(completion.token_ids)
-                    ):
-                        raise RuntimeError(
-                            "Missing or misaligned completion log probabilities"
+            results = []
+            for prompt_index, request in enumerate(requests):
+                for completion in request.outputs:
+                    log_probs = None
+                    if config.return_logprobs:
+                        token_logprobs = completion.logprobs
+                        if (
+                            token_logprobs is None
+                            or len(token_logprobs) != len(completion.token_ids)
+                        ):
+                            raise RuntimeError(
+                                "Missing or misaligned completion log probabilities"
+                            )
+
+                        log_probs = tuple(
+                            step[token_id].logprob
+                            for token_id, step in zip(
+                                completion.token_ids, token_logprobs
+                            )
                         )
 
-                    log_probs = tuple(
-                        step[token_id].logprob
-                        for token_id, step in zip(
-                            completion.token_ids, token_logprobs
+                    results.append(
+                        GenerationOutput(
+                            prompt_index=prompt_index,
+                            completion_token_ids=tuple(completion.token_ids),
+                            text=completion.text,
+                            finish_reason=completion.finish_reason,
+                            log_probs=log_probs,
                         )
                     )
 
-                results.append(
-                    GenerationOutput(
-                        prompt_index=prompt_index,
-                        completion_token_ids=tuple(completion.token_ids),
-                        text=completion.text,
-                        finish_reason=completion.finish_reason,
-                        log_probs=log_probs,
-                    )
-                )
-
-        self.logger.debug(
-            "generate: done completions=%d elapsed=%.3fs",
-            len(results), time.monotonic() - start,
-            extra={"event": "vllm.generate.done", "phase": "rollout",
-                   "num_completions": len(results)},
-        )
+            self.logger.debug(
+                "generate: done completions=%d elapsed=%.3fs",
+                len(results), time.monotonic() - start,
+                extra={"event": "vllm.generate.done", "phase": "rollout",
+                       "num_completions": len(results)},
+            )
         return results
 
 

@@ -30,7 +30,4 @@ class VLLMBackendConfig:
     max_num_batched_tokens: int | None = None
 
 
-class VLLMProfilerConfig:
-    ...
-
 
