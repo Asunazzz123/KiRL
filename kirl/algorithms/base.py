@@ -178,7 +178,7 @@ class _BaseTrainer(Trainer):
     def training_step(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Attach update context without changing Trainer's loss/backward logic."""
         with Log.bind(**self._logging_context, phase="update", step=self.state.global_step):
-            with self._probe.step("train.microstep"):
+            with self._probe.stage("train.microstep"):
                 return super().training_step(*args, **kwargs)
 
     def store_metrics(
@@ -226,6 +226,7 @@ class _BaseTrainer(Trainer):
             self._evaluating = previous
             self._metrics["eval"].clear()
 
+
     def log(self, logs: dict[str, float], *args: Any, **kwargs: Any) -> None:
         """
         Merge weighted algorithm metrics into Trainer's logging pipeline.
@@ -246,6 +247,9 @@ class _BaseTrainer(Trainer):
         with Log.bind(**self._logging_context, phase="eval" if mode == "eval" else "update",
                       step=self.state.global_step, event=f"{mode}.metrics"):
             super().log(merged, *args, **kwargs)
+            for name, value in merged.items():
+                if type(value) in (int, float):
+                    self._probe.metric(name, value, labels={"mode": mode})
         self._metrics[mode].clear()
 
     def model_card(

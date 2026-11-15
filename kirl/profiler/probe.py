@@ -9,6 +9,7 @@ import warnings
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Protocol
 
 from .basic_profiler import ProfilerConfig
 from .records import CaptureContext, MetricRecord, StageRecord, TraceArtifact, record_dict, safe_component
@@ -287,6 +288,12 @@ class Probe:
 
     def __exit__(self, *exc):
         self.close()
+
+
+class ProbeFactory(Protocol):
+    """Build a probe once backend adapters exist, e.g. ``partial(create_probe, cfg, run_id=...)``."""
+
+    def __call__(self, *, adapters: tuple) -> "Probe | NullProbe": ...
 
 
 def create_probe(config: ProfilerConfig, *, run_id: str, rank=0, role="train", adapters=(), algorithm=None):

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from ...profiler.vllm_profiler import VLLMProfilerConfig  # re-exported; listed in __all__
 from .base import GenerationConfig  # re-exported for backward compatibility
 
 __all__ = ["VLLMBackendConfig", "GenerationConfig", "VLLMProfilerConfig"]

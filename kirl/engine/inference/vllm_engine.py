@@ -13,7 +13,8 @@ from .base import GenerationBackend, GenerationOutput, GenerationConfig
 from .vllm_config import VLLMBackendConfig
 
 from ...utils.logging import Log
-from ...profiler.probe import NullProbe, Probe
+from ...profiler.probe import NullProbe, Probe, ProbeFactory
+from ...profiler.vllm_profiler import VLLMProfilerAdapter, VLLMProfilerConfig
 
 
 
@@ -21,7 +22,7 @@ from ...profiler.probe import NullProbe, Probe
 class vLLMEngine(GenerationBackend):
     def __init__(self, engine: LLM, *, probe: NullProbe | Probe | None=None) -> None:
         self._engine = engine
-        self._probe = Probe | NullProbe = (
+        self._probe: Probe | NullProbe = (
                 probe if probe is not None else NullProbe()
             )
         self._client: Any = None
@@ -30,14 +31,37 @@ class vLLMEngine(GenerationBackend):
         self.logger = Log.get_logger(__name__, role="inference")
 
     @classmethod
-    def from_config(cls, config: VLLMBackendConfig, *, probe=None) -> "vLLMEngine":
+    def from_config(
+        cls,
+        config: VLLMBackendConfig,
+        *,
+        profiler_config: VLLMProfilerConfig | None = None,
+        probe_factory: ProbeFactory | None = None,
+    ) -> "vLLMEngine":
+        """Build the offline ``LLM`` and, optionally, its profiling probe.
+
+        Args:
+            config: Model deployment settings.
+            profiler_config: vLLM profiler settings; must be fixed at ``LLM``
+                construction, so it is injected here rather than afterwards.
+            probe_factory: Called as ``probe_factory(adapters=...)`` after the
+                engine exists, e.g. ``partial(create_probe, cfg, run_id=..., rank=...)``.
+                ``None`` uses ``NullProbe``.
+        """
         logger = Log.get_logger(__name__, role="inference")
+        profiler_kwargs: dict[str, Any] = {}
+        if profiler_config is not None:
+            # LLM() disables stats by default; get_metrics() needs them.
+            profiler_kwargs["disable_log_stats"] = False
+            if profiler_config.profiler is not None:
+                profiler_kwargs["profiler_config"] = profiler_config.to_backend_config()
         logger.info(
             "Initializing vLLM engine: model=%s tp=%d dtype=%s gpu_mem=%.2f",
             config.model, config.tensor_parallel_size, config.dtype,
             config.gpu_memory_utilization,
             extra={"event": "vllm.init", "phase": "init"},
         )
+
         engine = LLM(
             model=config.model,
             tokenizer=config.tokenizer,
@@ -51,12 +75,19 @@ class vLLMEngine(GenerationBackend):
             enable_sleep_mode=config.enable_sleep_mode,
             max_num_seqs=config.max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            **profiler_kwargs,
         )
         logger.info(
             "vLLM engine ready",
             extra={"event": "vllm.ready", "phase": "init"},
         )
-        return cls(engine, probe=probe)
+        if probe_factory is None:
+            return cls(engine)
+        adapters = (
+            (VLLMProfilerAdapter(engine, profiler_config),)
+            if profiler_config is not None else ()
+        )
+        return cls(engine, probe=probe_factory(adapters=adapters))
 
 
 
