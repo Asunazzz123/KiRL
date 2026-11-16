@@ -50,6 +50,8 @@ checkpoints/
 logs/
 wandb/
 *.log
+## visualization
+index.html
 
 # Data
 data/

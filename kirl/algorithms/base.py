@@ -11,7 +11,7 @@ from typing import Any, ClassVar, Literal, TypeAlias
 from accelerate.utils import gather_object
 from transformers import (
     Trainer, TrainingArguments, PreTrainedModel, AutoModelForCausalLM,
-    AutoTokenizer, PreTrainedTokenizerBase,
+    AutoTokenizer, PreTrainedTokenizerBase, TrainerCallback
 )
 
 from ..utils.logging import Log
@@ -52,6 +52,38 @@ class RolloutData:
             old_log_probs=self.old_log_probs.to(device),
             values = self.values.to(device) if self.values is not None else None
         )
+
+
+class RolloutWeightSyncCallback(TrainerCallback):
+    """
+    Sync policy weights to the rollout backend after each optimizer update.
+
+    Runs at Trainer's step-end boundary, after gradient accumulation and the
+    optimizer step. Skips synchronization when the accelerator reports that
+    the optimizer update was skipped, and records the transfer under the
+    ``weight_sync`` profiling stage.
+
+    All participating ranks must enter this callback when policy parameter
+    gathering requires distributed collectives, such as FSDP all-gather.
+
+    Args:
+        trainer: Trainer providing the accelerator, profiling probe, rollout
+            backend, and policy parameter iterator. Register an instance with
+            ``trainer.add_callback(RolloutWeightSyncCallback(trainer))``.
+    """
+    def __init__(self,trainer:_BaseTrainer):
+        self.trainer = trainer
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.trainer.accelerator.optimizer_step_was_skipped:
+            return control
+
+        with self.trainer._probe.stage("weight_sync"):
+            self.trainer._generation_backend.update_weight(
+                self.trainer._iter_policy_params()
+            )
+        return control
+
 
 
 class _BaseTrainer(Trainer):

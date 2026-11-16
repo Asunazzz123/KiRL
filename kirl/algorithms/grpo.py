@@ -7,7 +7,7 @@ from typing import Any
 from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizerBase
 
 from .core_algo import compute_grpo_policy_loss
-from .base import _BaseTrainer, RewardFunc, RolloutData
+from .base import _BaseTrainer, RewardFunc, RolloutData, RolloutWeightSyncCallback
 from ..engine.inference.base import GenerationBackend, GenerationConfig
 from ..datasets import BaseDataset, RLDataCollator
 from ..utils.logging import Log
@@ -81,7 +81,7 @@ class GRPOTrainer(_BaseTrainer):
         self._prepare_reference_policy()
         self._setup_generation(backend=generation_backend)
         self._initialize_rollout_state()
-
+        self.add_callback(RolloutWeightSyncCallback(self)) # Registor Callback hook
 
     def _setup_generation(
         self,
@@ -230,11 +230,13 @@ class GRPOTrainer(_BaseTrainer):
             metadata["policy/kl"] = kl_loss.detach()
         return loss, metadata
 
-    def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
-        """Run a Trainer step and sync updated weights to the rollout backend."""
-        loss = super().training_step(model, inputs, num_items_in_batch)
-        self._generation_backend.update_weight(self._iter_policy_params())
-        return loss
+    # Training Step inherit from _BaseTrainer
+    # def training_step(self, model, inputs, num_items_in_batch=None) -> torch.Tensor:
+    #     """Run a Trainer step and sync updated weights to the rollout backend."""
+    #     loss = super().training_step(model, inputs, num_items_in_batch)
+    #     self._generation_backend.update_weight(self._iter_policy_params())
+    #     return loss
+
 
     def _run_rollout(
         self,
