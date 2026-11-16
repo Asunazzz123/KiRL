@@ -1,4 +1,15 @@
-"""Offline summaries: preserve rank/clock/labels; do not add overlapping timings."""
+"""
+Offline summaries: preserve rank/clock/labels; do not add overlapping timings.
+
+To build profiler result
+```python
+from kirl.profiler import build_report
+report = build_report("<run_id path>")
+report.export("profile_report.json")
+```
+"""
+
+
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
