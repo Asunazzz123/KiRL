@@ -7,7 +7,7 @@ from typing import Any
 from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizerBase
 
 from .core_algo import compute_grpo_policy_loss
-from .base import _BaseTrainer, RewardFunc, RolloutData, RolloutWeightSyncCallback
+from .base import _BaseTrainer, RewardFunc, RolloutData, RolloutWeightSyncCallback, ReferencePolicyCallback
 from ..engine.inference.base import GenerationBackend, GenerationConfig
 from ..datasets import BaseDataset, RLDataCollator
 from ..utils.logging import Log
@@ -78,7 +78,9 @@ class GRPOTrainer(_BaseTrainer):
             data_collator=data_collator,
             probe=probe
         )
-        self._prepare_reference_policy()
+        if self.algo_config["beta"] > 0:
+            self._create_reference_policy()
+            self.add_callback(ReferencePolicyCallback(self))
         self._setup_generation(backend=generation_backend)
         self._initialize_rollout_state()
         self.add_callback(RolloutWeightSyncCallback(self)) # Registor Callback hook
@@ -342,6 +344,15 @@ class GRPOTrainer(_BaseTrainer):
         Returns:
             Scalar loss tensor with gradient attached.
         """
+        if self.algo_config["beta"] > 0 and (
+            self.reference_model is None or not self._reference_prepared
+        ):
+            raise RuntimeError(
+                "Reference policy must be created and prepared before compute_loss; "
+                "train() prepares it in on_train_begin. Standalone evaluation "
+                "requires explicit preparation after policy setup."
+            )
+
         prompts: list[str] = inputs["prompt"]
         solutions: list[str] = inputs["solution"]
 
@@ -383,7 +394,7 @@ class GRPOTrainer(_BaseTrainer):
         # --- reference forward (KL penalty) ---
         ref_log_probs: torch.Tensor | None = None
         beta = self.algo_config["beta"]
-        if beta > 0 and self.reference_model is not None:
+        if beta > 0:
             with torch.no_grad():
                 ref_logits = self.reference_model(
                     input_ids=input_ids, attention_mask=attn_mask
