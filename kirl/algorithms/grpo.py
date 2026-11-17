@@ -7,7 +7,7 @@ from typing import Any
 from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizerBase
 
 from .core_algo import compute_grpo_policy_loss
-from .base import _BaseTrainer, RewardFunc, RolloutData, RolloutWeightSyncCallback
+from .base import _BaseTrainer, RewardFunc, RolloutData, RolloutWeightSyncCallback, ReferencePolicyCallback
 from ..engine.inference.base import GenerationBackend, GenerationConfig
 from ..datasets import BaseDataset, RLDataCollator
 from ..utils.logging import Log
@@ -78,7 +78,9 @@ class GRPOTrainer(_BaseTrainer):
             data_collator=data_collator,
             probe=probe
         )
-        self._prepare_reference_policy()
+        if self.algo_config["beta"] > 0:
+            self._create_reference_policy()
+            self.add_callback(ReferencePolicyCallback(self))
         self._setup_generation(backend=generation_backend)
         self._initialize_rollout_state()
         self.add_callback(RolloutWeightSyncCallback(self)) # Registor Callback hook
@@ -193,7 +195,9 @@ class GRPOTrainer(_BaseTrainer):
         """Compute GRPO clipped surrogate loss with optional KL penalty.
 
         Delegates the clipped surrogate to ``compute_grpo_policy_loss`` and
-        adds the reference-policy KL term when ``beta > 0``.
+        adds the reference-policy KL estimator exp(delta) - delta - 1 when
+        ``beta > 0``, where delta = log(pi_ref) - log(pi). Both terms use
+        the requested token or sequence reduction over valid response tokens.
 
         Args:
             log_probs: Current policy log-probs, shape ``[B, T]``.
@@ -223,9 +227,18 @@ class GRPOTrainer(_BaseTrainer):
             if ref_log_probs is None:
                 raise ValueError("ref_log_probs is required when beta > 0")
             mask = response_mask.bool()
-            kl = torch.where(mask, log_probs.float() - ref_log_probs.detach().float(), 0.0)
-            kl_per_seq = kl.sum(dim=-1) / mask.sum(dim=-1).clamp_min(1)
-            kl_loss = beta * kl_per_seq.mean()
+            # Mask before exponentiation so padding cannot overflow the estimator.
+            delta = torch.where(
+                mask, ref_log_probs.detach().float() - log_probs.float(), 0.0
+            )
+            kl = torch.expm1(delta) - delta
+            token_counts = mask.sum(dim=-1)
+            if reduction == "sequence_mean":
+                kl_per_seq = kl.sum(dim=-1) / token_counts.clamp_min(1)
+                mean_kl = kl_per_seq.sum() / (token_counts > 0).sum().clamp_min(1)
+            else:
+                mean_kl = kl.sum() / mask.sum().clamp_min(1)
+            kl_loss = beta * mean_kl
             loss = loss + kl_loss
             metadata["policy/kl"] = kl_loss.detach()
         return loss, metadata
@@ -258,9 +271,13 @@ class GRPOTrainer(_BaseTrainer):
         G = self.algo_config["group_size"]
         tokenizer = self.processing_class
 
-        # Tokenize prompts; left-pad so generation appends to the right.
+        # The generation backend consumes unpadded token lists, not attention masks.
         enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=False)
-        prompt_token_ids: list[list[int]] = enc["input_ids"].tolist()
+        # Use the mask rather than token IDs: pad_token_id may also be EOS.
+        prompt_token_ids: list[list[int]] = [
+            ids[mask.bool()].tolist()
+            for ids, mask in zip(enc["input_ids"], enc["attention_mask"])
+        ]
 
         # Generate G completions per prompt → list of B*G GenerationOutput.
         outputs = self._generation_backend.generate(prompt_token_ids, self._generation_config)
@@ -342,6 +359,15 @@ class GRPOTrainer(_BaseTrainer):
         Returns:
             Scalar loss tensor with gradient attached.
         """
+        if self.algo_config["beta"] > 0 and (
+            self.reference_model is None or not self._reference_prepared
+        ):
+            raise RuntimeError(
+                "Reference policy must be created and prepared before compute_loss; "
+                "train() prepares it in on_train_begin. Standalone evaluation "
+                "requires explicit preparation after policy setup."
+            )
+
         prompts: list[str] = inputs["prompt"]
         solutions: list[str] = inputs["solution"]
 
@@ -383,7 +409,7 @@ class GRPOTrainer(_BaseTrainer):
         # --- reference forward (KL penalty) ---
         ref_log_probs: torch.Tensor | None = None
         beta = self.algo_config["beta"]
-        if beta > 0 and self.reference_model is not None:
+        if beta > 0:
             with torch.no_grad():
                 ref_logits = self.reference_model(
                     input_ids=input_ids, attention_mask=attn_mask

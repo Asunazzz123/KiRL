@@ -6,6 +6,7 @@ import math
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from contextlib import closing, contextmanager
 from numbers import Real
 from typing import Any, ClassVar, Literal, TypeAlias
 from accelerate.utils import gather_object
@@ -17,6 +18,7 @@ from transformers import (
 from ..utils.logging import Log
 from ..datasets import BaseDataset
 from ..profiler import NullProbe, Probe
+from ..distributed.ref_policy import create_reference_policy, prepare_reference_policy
 
 RewardFunc: TypeAlias = Callable[..., "list[float | None]"]
 
@@ -79,11 +81,18 @@ class RolloutWeightSyncCallback(TrainerCallback):
             return control
 
         with self.trainer._probe.stage("weight_sync"):
-            self.trainer._generation_backend.update_weight(
-                self.trainer._iter_policy_params()
-            )
+            with self.trainer._policy_params_for_rollout() as named_params:
+                self.trainer._generation_backend.update_weight(named_params)
         return control
 
+class ReferencePolicyCallback(TrainerCallback):
+    """Prepare the frozen reference after Trainer prepares the policy."""
+    def __init__(self,trainer:_BaseTrainer):
+        self.trainer = trainer
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.trainer._prepare_reference_policy()
+        return control
 
 
 class _BaseTrainer(Trainer):
@@ -111,7 +120,13 @@ class _BaseTrainer(Trainer):
             )
         return cls._cls_logger
 
-    def __init__(self, *args: Any, run_id: str | None = None, probe: Probe | NullProbe | None = None , **kwargs: Any) -> None:
+    def __init__(
+            self,
+            *args: Any,
+            run_id: str | None = None,
+            probe: Probe | NullProbe | None = None,
+            **kwargs: Any
+        ) -> None:
         # Allocate before Trainer initialization so subclass hooks can use it.
         self._metrics: dict[str, dict[str, tuple[float, float]]] = {
             "train": {},
@@ -135,8 +150,11 @@ class _BaseTrainer(Trainer):
         self.logger = Log.get_logger(__name__, **self._logging_context)
         if hasattr(self.model, "add_model_tags"):
             self.model.add_model_tags(list(self._tag_names))
-        self.reference_model: PreTrainedModel | None = None
         self._telemetry()
+        # Reference Model
+        self.reference_model: torch.nn.Module | None = None
+        self._reference_prepared = False
+
 
     def _telemetry(self) -> dict[str, Any]:
         """Return runtime metadata and log it locally on the main process."""
@@ -161,51 +179,77 @@ class _BaseTrainer(Trainer):
             )
         return metadata
 
-    def _prepare_reference_policy(self) -> None:
-        """Create a frozen copy of self.model for KL / implicit-reward computation.
-
-        Non-distributed and DDP: deepcopy the unwrapped model, freeze parameters,
-        and move to the accelerator device.
-
-        FSDP / DeepSpeed: deepcopy is unsafe on sharded flat params; raises
-        NotImplementedError until the distributed path is implemented.
-
-        Callers that do not need a reference model (e.g. beta=0) should
-        simply skip calling this method; self.reference_model stays None.
-        """
-        if self.is_fsdp_enabled or self.is_deepspeed_enabled:
+    def _create_reference_policy(self) -> None:
+        """Create the frozen reference before policy wrapping."""
+        if self.reference_model is not None:
+            raise RuntimeError("Reference policy has already been created.")
+        if self.is_deepspeed_enabled:
             raise NotImplementedError(
-                "Reference policy under FSDP/DeepSpeed is not yet implemented. "
-                "Override _prepare_reference_policy_sharded, or set beta=0 to skip."
+                "Reference policies support single device, DDP and FSDP1/FSDP2; "
+                "DeepSpeed is not implemented."
             )
-        import copy
-        # Unwrap to get the base PreTrainedModel before accelerator wrapping.
-        unwrapped = self.accelerator.unwrap_model(self.model)
-        ref = copy.deepcopy(unwrapped)
-        ref.eval()
-        for p in ref.parameters():
-            p.requires_grad_(False)
-        ref = ref.to(self.accelerator.device)
-        self.reference_model = ref
-        self.logger.info(
-            "Reference policy ready (deepcopy, frozen)",
-            extra={"event": "reference_policy.ready", "phase": "init", "step": 0},
+        self.reference_model = create_reference_policy(self.model)
+        self._reference_prepared = False
+
+    def _prepare_reference_policy(self) -> None:
+        """Prepare the reference after the training policy is prepared."""
+        if self.reference_model is None or self._reference_prepared:
+            return
+
+        self.reference_model = prepare_reference_policy(
+            self.reference_model,
+            self.accelerator,
         )
+        self._reference_prepared = True
+
+    @contextmanager
+    def _policy_params_for_rollout(self):
+        """Keep gathered parameters alive until synchronous backend loading ends.
+
+        All ranks must consume the iterator in the same order. Closing it on
+        failure also exits any FSDP1 full-parameter context held by the iterator.
+        The backend must finish consuming/copying tensors before returning.
+        """
+        with closing(self._iter_policy_params()) as params:
+            yield params
 
     def _iter_policy_params(self):
-        """Yield (name, tensor) pairs of the full, named policy parameters.
+        """Yield full policy parameters; use _policy_params_for_rollout to consume.
 
-        Under FSDP, summons complete params across ranks before yielding and
-        releases the all-gather on exit. Under DDP and single-GPU the unwrapped
-        model's named_parameters() already holds complete weights.
+        FSDP1 gathering retains the wrapped root. FSDP2 gathers DTensors one
+        parameter at a time. DeepSpeed export is intentionally unsupported.
         """
-        unwrapped = self.accelerator.unwrap_model(self.model)
+        if self.is_deepspeed_enabled:
+            raise NotImplementedError("DeepSpeed rollout weight export is not implemented.")
+        model = self.model_wrapped
         if self.is_fsdp_enabled:
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-            with FSDP.summon_full_params(unwrapped, writeback=False):
-                yield from unwrapped.named_parameters()
-        else:
-            yield from unwrapped.named_parameters()
+            version = self.accelerator.state.fsdp_plugin.fsdp_version
+            if version == 1:
+                from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+                # Do not unwrap the FSDP root before gathering its parameters.
+                if not FSDP.fsdp_modules(model):
+                    raise RuntimeError("Policy must be FSDP1-prepared before weight export.")
+                with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
+                    # FSDP cleans nested wrapper names inside this context.
+                    for name, parameter in model.named_parameters():
+                        yield name, parameter.detach()
+                return
+            if version != 2:
+                raise NotImplementedError(f"Unsupported FSDP version: {version}")
+            from torch.distributed.tensor import DTensor
+
+            model = self.accelerator.unwrap_model(model, keep_torch_compile=False)
+            for name, parameter in model.named_parameters():
+                tensor = parameter.detach()
+                if isinstance(tensor, DTensor):
+                    tensor = tensor.full_tensor()
+                yield name, tensor
+            return
+
+        model = self.accelerator.unwrap_model(model, keep_torch_compile=False)
+        for name, parameter in model.named_parameters():
+            yield name, parameter.detach()
 
     def training_step(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         """Attach update context without changing Trainer's loss/backward logic."""

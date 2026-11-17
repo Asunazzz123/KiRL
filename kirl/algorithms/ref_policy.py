@@ -1,1 +1,0 @@
-# TODO: FSDP sharding reference policy
