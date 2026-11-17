@@ -195,7 +195,9 @@ class GRPOTrainer(_BaseTrainer):
         """Compute GRPO clipped surrogate loss with optional KL penalty.
 
         Delegates the clipped surrogate to ``compute_grpo_policy_loss`` and
-        adds the reference-policy KL term when ``beta > 0``.
+        adds the reference-policy KL estimator exp(delta) - delta - 1 when
+        ``beta > 0``, where delta = log(pi_ref) - log(pi). Both terms use
+        the requested token or sequence reduction over valid response tokens.
 
         Args:
             log_probs: Current policy log-probs, shape ``[B, T]``.
@@ -225,9 +227,18 @@ class GRPOTrainer(_BaseTrainer):
             if ref_log_probs is None:
                 raise ValueError("ref_log_probs is required when beta > 0")
             mask = response_mask.bool()
-            kl = torch.where(mask, log_probs.float() - ref_log_probs.detach().float(), 0.0)
-            kl_per_seq = kl.sum(dim=-1) / mask.sum(dim=-1).clamp_min(1)
-            kl_loss = beta * kl_per_seq.mean()
+            # Mask before exponentiation so padding cannot overflow the estimator.
+            delta = torch.where(
+                mask, ref_log_probs.detach().float() - log_probs.float(), 0.0
+            )
+            kl = torch.expm1(delta) - delta
+            token_counts = mask.sum(dim=-1)
+            if reduction == "sequence_mean":
+                kl_per_seq = kl.sum(dim=-1) / token_counts.clamp_min(1)
+                mean_kl = kl_per_seq.sum() / (token_counts > 0).sum().clamp_min(1)
+            else:
+                mean_kl = kl.sum() / mask.sum().clamp_min(1)
+            kl_loss = beta * mean_kl
             loss = loss + kl_loss
             metadata["policy/kl"] = kl_loss.detach()
         return loss, metadata
@@ -260,9 +271,13 @@ class GRPOTrainer(_BaseTrainer):
         G = self.algo_config["group_size"]
         tokenizer = self.processing_class
 
-        # Tokenize prompts; left-pad so generation appends to the right.
+        # The generation backend consumes unpadded token lists, not attention masks.
         enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=False)
-        prompt_token_ids: list[list[int]] = enc["input_ids"].tolist()
+        # Use the mask rather than token IDs: pad_token_id may also be EOS.
+        prompt_token_ids: list[list[int]] = [
+            ids[mask.bool()].tolist()
+            for ids, mask in zip(enc["input_ids"], enc["attention_mask"])
+        ]
 
         # Generate G completions per prompt → list of B*G GenerationOutput.
         outputs = self._generation_backend.generate(prompt_token_ids, self._generation_config)
