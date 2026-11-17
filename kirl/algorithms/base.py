@@ -231,8 +231,8 @@ class _BaseTrainer(Trainer):
                 if not FSDP.fsdp_modules(model):
                     raise RuntimeError("Policy must be FSDP1-prepared before weight export.")
                 with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
-                    unwrapped = self.accelerator.unwrap_model(model, keep_torch_compile=False)
-                    for name, parameter in unwrapped.named_parameters():
+                    # FSDP cleans nested wrapper names inside this context.
+                    for name, parameter in model.named_parameters():
                         yield name, parameter.detach()
                 return
             if version != 2:
