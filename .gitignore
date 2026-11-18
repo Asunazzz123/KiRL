@@ -62,6 +62,7 @@ data/
 !requirements.txt
 !configs/**/*.yaml
 !configs/**/*.txt
+artifacts/
 
 # OS
 .DS_Store
