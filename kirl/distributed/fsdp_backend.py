@@ -146,6 +146,7 @@ class FSDPBackend:
 
         return FSDP(
             model,
+            cpu_offload=fsdp.CPUOffload(offload_params=self.config.cpu_offload),
             auto_wrap_policy=wrap_policy,
             sharding_strategy=ShardingStrategy[self.config.sharding_strategy],
             mixed_precision=mixed_precesion,
@@ -194,9 +195,11 @@ class FSDPBackend:
             for module in model.modules()
             if module is not model and isinstance(module, layer_types)
         ]
+        offload = {"offload_policy": fsdp.CPUOffloadPolicy()} if self.config.cpu_offload else {}
         for block in reversed(blocks):
             fully_shard(
                 block,
+                **offload,
                 mesh=mesh,
                 mp_policy=mixed_precision,
                 reshard_after_forward=self.config.reshard_after_forward,
@@ -204,6 +207,7 @@ class FSDPBackend:
 
         fully_shard(
             model,
+            **offload,
             mesh=mesh,
             mp_policy=mixed_precision,
             reshard_after_forward=self.config.reshard_after_forward,
