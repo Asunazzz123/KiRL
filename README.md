@@ -1,5 +1,8 @@
 # KiRL
 
+> _**K**nown or unknown, every path I explore bends toward one point._<br>
+> _**I**f the reward is ever in doubt, I'll keep running for it anyway._
+
 An educational RL training engine for understanding bottom-level design patterns in reinforcement learning systems.
 
 ## Design Goals

@@ -217,10 +217,16 @@ class _BaseTrainer(Trainer):
         """Yield full policy parameters; use _policy_params_for_rollout to consume.
 
         FSDP1 gathering retains the wrapped root. FSDP2 gathers DTensors one
-        parameter at a time. DeepSpeed export is intentionally unsupported.
+        parameter at a time. ZeRO-3 gathers each parameter during consumption.
         """
         if self.is_deepspeed_enabled:
-            raise NotImplementedError("DeepSpeed rollout weight export is not implemented.")
+            from deepspeed import zero
+
+            engine = self.model_wrapped
+            for name, parameter in engine.module.named_parameters():
+                with zero.GatheredParameters(parameter, enabled=hasattr(parameter, "ds_id")):
+                    yield name, parameter.detach()
+            return
         model = self.model_wrapped
         if self.is_fsdp_enabled:
             version = self.accelerator.state.fsdp_plugin.fsdp_version

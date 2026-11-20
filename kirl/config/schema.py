@@ -80,7 +80,16 @@ class RewardSchema:
 
 
 @dataclass
+class OptimizerPlacementSchema:
+    mode: str = "native"
+    cpu_ratio: float = 1.0
+    sub_group_size: int = 10**9
+    kwargs: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class TrainSchema:
+    optimizer: OptimizerPlacementSchema = field(default_factory=OptimizerPlacementSchema)
     algo: AlgoSchema = field(default_factory=AlgoSchema)
     dataset: DatasetSchema = field(default_factory=DatasetSchema)
     engine: EngineSchema = field(default_factory=EngineSchema)

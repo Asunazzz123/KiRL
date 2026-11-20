@@ -36,6 +36,7 @@ class SFTTrainer(_BaseTrainer):
         model_init_kwargs: dict[str, Any] | None = None,
         tokenizer_init_kwargs: Mapping[str, Any] | None = None,
         processing_class: PreTrainedTokenizerBase | None = None,
+        optimizer_cls_and_kwargs=None,
         data_collator=None,
     ) -> None:
         args = self._validate_config(args, algo_config)
@@ -66,6 +67,7 @@ class SFTTrainer(_BaseTrainer):
             eval_dataset=eval_dataset,
             processing_class=tokenizer,
             data_collator=data_collator,
+            **({"optimizer_cls_and_kwargs": optimizer_cls_and_kwargs} if optimizer_cls_and_kwargs else {}),
             probe=probe
         )
 

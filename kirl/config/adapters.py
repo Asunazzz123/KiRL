@@ -39,6 +39,7 @@ class TrainConfig:
     generation: GenerationConfig
     rollout: VLLMBackendConfig
     profiler: ProfilerSettings
+    optimizer_cls_and_kwargs: tuple | None = None
 
 
 def _number(name: str, value: Any, *, minimum: float = 0, inclusive: bool = False) -> None:
@@ -113,7 +114,30 @@ def resolve_train_config(
         _choice(f"engine.{name}", engine[name], ("float16", "bfloat16", "float32"))
     if not engine["model_id"].strip():
         raise ValueError("engine.model_id must not be empty")
-    _choice("engine.optimizer", engine["optimizer"], ("adamw", "sgd"))
+    placement = values["optimizer"]
+    _choice("optimizer.mode", placement["mode"], ("native", "hybrid"))
+    optimizer_spec = None
+    if placement["mode"] == "hybrid":
+        import torch
+        from kirl.engine.optim import HybridDeviceOptimizer
+
+        classes = {"adam": "Adam", "adamw": "AdamW", "sgd": "SGD", "muon": "Muon"}
+        _choice("engine.optimizer", engine["optimizer"], tuple(classes))
+        _number("optimizer.cpu_ratio", placement["cpu_ratio"], inclusive=True)
+        if placement["cpu_ratio"] > 1:
+            raise ValueError("optimizer.cpu_ratio must be <= 1")
+        _number("optimizer.sub_group_size", placement["sub_group_size"])
+        options = dict(placement["kwargs"])
+        reserved = {"params", "optimizer_cls", "cpu_ratio", "sub_group_size", "lr", "weight_decay"}
+        if reserved.intersection(options):
+            raise ValueError("Use the dedicated configuration fields for placement, lr and weight decay")
+        optimizer_spec = (HybridDeviceOptimizer, dict(
+            optimizer_cls=getattr(torch.optim, classes[engine["optimizer"]]),
+            cpu_ratio=placement["cpu_ratio"], sub_group_size=placement["sub_group_size"],
+            lr=engine["learning_rate"], weight_decay=engine["weight_decay"], **options,
+        ))
+    else:
+        _choice("engine.optimizer", engine["optimizer"], ("adamw", "sgd"))
     _choice("engine.lr_scheduler", engine["lr_scheduler"], ("cosine", "linear", "constant"))
     if engine["name"] == "fsdp":
         _choice("engine.sharding_strategy", engine["sharding_strategy"],
@@ -162,13 +186,14 @@ def resolve_train_config(
         "learning_rate": engine["learning_rate"], "weight_decay": engine["weight_decay"],
         "max_grad_norm": engine["max_grad_norm"], "warmup_steps": engine["warmup_steps"],
         "lr_scheduler_type": engine["lr_scheduler"],
-        "optim": {"adamw": "adamw_torch", "sgd": "sgd"}[engine["optimizer"]],
         "gradient_checkpointing": engine["gradient_checkpointing"],
         "bf16": engine["compute_dtype"] == "bfloat16", "fp16": engine["compute_dtype"] == "float16",
         "logging_steps": values["log_interval"], "eval_steps": values["eval_interval"],
         "save_steps": values["save_interval"], "seed": values["seed"],
         "data_seed": dataset["seed"], "full_determinism": values["deterministic"],
     }
+    if optimizer_spec is None:
+        training_args["optim"] = {"adamw": "adamw_torch", "sgd": "sgd"}[engine["optimizer"]]
     if engine["name"] == "fsdp":
         strategy = {"FULL_SHARD": "full_shard", "SHARD_GRAD_OP": "shard_grad_op", "NO_SHARD": "no_shard"}
         training_args["fsdp"] = strategy[engine["sharding_strategy"]] + (" offload" if engine["cpu_offload"] else "")
@@ -184,4 +209,4 @@ def resolve_train_config(
         **{key: value for key, value in rollout.items() if key != "backend"},
         model=engine["model_id"], dtype=engine["compute_dtype"], seed=values["seed"],
     )
-    return TrainConfig(values, training_args, dict(algo), generation_config, generation_output, rollout_config, profiler)
+    return TrainConfig(values, training_args, dict(algo), generation_config, generation_output, rollout_config, profiler, optimizer_spec)
