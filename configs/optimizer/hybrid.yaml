@@ -1,0 +1,5 @@
+# CPU ratio applies to whole local subgroups.
+mode: hybrid
+cpu_ratio: 1.0
+sub_group_size: 1000000000
+kwargs: {}
