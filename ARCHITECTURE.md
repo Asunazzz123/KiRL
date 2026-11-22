@@ -142,7 +142,7 @@ Provides infrastructure shared across all RL trainers:
 |---|---|
 | `_resolve_model` | `str \| PreTrainedModel → PreTrainedModel` |
 | `_resolve_tokenizer` | Load + configure padding |
-| `_prepare_reference_policy` | deepcopy + freeze for KL (non-FSDP only) |
+| `_prepare_reference_policy` | Prepare the frozen KL reference through Accelerate (single device, DDP or FSDP); DeepSpeed reference preparation is unsupported |
 | `_normalize_rewards` | `fn \| list[fn] → list[fn]` |
 | `_validate_dataset` | type check |
 | `_validate_config` | validate `TrainingArguments` |
@@ -152,26 +152,23 @@ Provides infrastructure shared across all RL trainers:
 | `evaluate` | mode-switching wrapper |
 | `training_step` | `Log.bind` context wrapper |
 
-**`_iter_policy_params`** is the FSDP hook: under FSDP it enters
-`FSDP.summon_full_params(writeback=False)` before yielding, so the rollout
-backend receives complete, correctly-named weights. Under DDP/single-GPU it
-yields directly from `unwrap_model(model).named_parameters()`.
+Policy export keeps each gathered tensor alive until the inference backend consumes it. FSDP1 uses `summon_full_params`, FSDP2 calls `DTensor.full_tensor()` per parameter, and ZeRO-3 uses `GatheredParameters`. DDP and single-device training yield the unwrapped parameters directly.
 
 ### `GRPOTrainer`
 
-Training loop per step:
+A Trainer update may accumulate several microbatches:
 
 ```
 training_step (overridden)
-  └─ super().training_step          Log.bind + Trainer forward/backward/opt
+  └─ super().training_step          Trainer forward/backward for one microbatch
        └─ compute_loss
             ├─ _run_rollout          tokenize → generate(G/prompt) →
             │                        reward_funcs → group advantage normalise
             ├─ policy forward        input_ids=[prompt‖completion] → log_probs [B*G,T]
             ├─ reference forward     ref_log_probs [B*G,T]  (beta > 0 only)
             └─ grpo_loss             clip surrogate + KL → (loss, metadata)
-  └─ _iter_policy_params
-       └─ update_weight              push weights to vLLM engine
+RolloutWeightSyncCallback.on_step_end (after a successful optimizer update)
+  └─ _iter_policy_params → update_weight
 ```
 
 **`_run_rollout`** returns `(RolloutData, advantages, completion_ids)`:
@@ -261,43 +258,28 @@ fsdp_backend.py   FSDPBackend — model wrapping, broadcast, optimizer offload
 Sharding unit is determined by `transformer_layer_cls` (e.g. `LlamaDecoderLayer`);
 the backend validates that at least one child module matches before wrapping.
 
-Weight sync to vLLM under FSDP goes through `_iter_policy_params` in
-`_BaseTrainer`, which uses `FSDP.summon_full_params(writeback=False)` to
-all-gather complete weights before passing them to `update_weight`.
+FSDP can offload model and gradient shards through its CPU offload policy. Separately, `HybridDeviceOptimizer` in `kirl/engine/optim.py` places optimizer subgroups on CPU or the parameter device and delegates updates to the selected algorithm. Trainer-managed FSDP wrapping runs through Accelerate.
 
----
+## Training and rollout placement
 
-## Multi-GPU Communication Pattern
+Today each participating training rank enters the weight-export callback in the same order. The embedded vLLM backend synchronously loads the resulting parameter stream into its driver model. Configuring inference TP alone does not establish weight delivery to every worker of a separately placed replica.
 
-```
-Training side (FSDP)                   Inference side (TP)
-─────────────────────                  ──────────────────
-Rank 0 ──┐                             GPU 0 ──┐
-Rank 1 ──┼─ all-gather params          GPU 1 ──┼─ tensor-parallel LLM
-Rank 2 ──┤  reduce-scatter grads       GPU 2 ──┤  (vLLM TP group)
-Rank 3 ──┘  per-rank opt step          GPU 3 ──┘
-         │                                      ▲
-         └── update_weight (summon) ────────────┘
-              after each opt step
-```
-
-FSDP training and vLLM TP inference use independent GPU groups. The trainer
-calls `update_weight` once per optimizer step; under FSDP this requires
-`summon_full_params` to materialize parameters on every rank before the sync.
+The planned thin runtime will schedule a training group and a pool of rollout replicas independently. A completed update will publish a policy version; each replica will acknowledge it before serving requests for that version. A replayable trajectory will carry token IDs, action masks, behavior logprobs and that version. OPD will score student actions with a frozen teacher, while an agent sandbox will supply tool observations between actions. See the [roadmap](TODO.md) for implementation and acceptance tasks.
 
 ---
 
 ## Configuration Flow
 
 ```
-configs/algo/grpo.yaml
+configs/train.yaml + selected config groups
         │
         ▼ (Hydra compose)
 resolve_train_config(cfg)
         │
         ├─ TrainConfig.training_args  → TrainingArguments(...)
         ├─ TrainConfig.algo_config    → GRPOTrainer(algo_config=...)
-        ├─ TrainConfig.generation     → vLLMEngine._generation_config
+        ├─ TrainConfig.optimizer_cls_and_kwargs → Trainer optimizer selection
+        ├─ TrainConfig.generation     → generation backend sampling settings
         ├─ TrainConfig.rollout        → vLLMEngine.from_config(...)
         └─ TrainConfig.resolved["dataset"] → build_dataset(cfg, split)
 ```
@@ -326,7 +308,7 @@ resolve_train_config(cfg)
 
 1. **Python 3.11+** (union types, `typing.Self`)
 2. **PyTorch 2.2+** (FSDP2 `fully_shard`, `torch.compile` support)
-3. **Single-node multi-GPU focus** (8 GPUs max for training)
+3. **Single-node multi-GPU focus** for initial validation
 4. **Hydra for configuration** — `register_configs()` must be called before compose
 5. **No custom CUDA kernels** — keep implementation readable
 6. **HuggingFace Trainer owns the loop** — KiRL hooks in via `compute_loss` / `training_step`
