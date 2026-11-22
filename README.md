@@ -20,7 +20,7 @@ KiRL/
 │   ├── algorithms/              # Pluggable RL algorithms
 │   │   ├── base.py             # _BaseTrainer: shared Trainer infrastructure
 │   │   ├── core_algo.py        # Loss kernels: GRPO, PPO, DPO, Dr.GRPO
-│   │   ├── grpo.py             # GRPOTrainer (scaffold; loss not yet wired)
+│   │   ├── grpo.py             # GRPOTrainer: rollout, rewards, advantages and policy loss
 │   │   ├── ppo.py              # PPOTrainer (stub)
 │   │   ├── dpo.py              # DPOTrainer (stub)
 │   │   ├── sft.py              # SFTTrainer
@@ -40,7 +40,8 @@ KiRL/
 │   │   ├── fsdp_config.py      # FSDPConfig dataclass
 │   │   └── fsdp_backend.py     # FSDPBackend: FSDP1/FSDP2 wrapping + probe hooks
 │   ├── engine/                  # Engine core
-│   │   ├── checkpoint.py       # Checkpoint management (stub)
+│   │   ├── checkpoint.py       # Trainer checkpoint integration and RL metadata
+│   │   ├── optim.py            # HybridDeviceOptimizer: synchronous CPU/device updates
 │   │   └── inference/
 │   │       ├── base.py         # GenerationBackend ABC, GenerationConfig, GenerationOutput
 │   │       ├── vllm_config.py  # VLLMBackendConfig dataclass
@@ -63,6 +64,7 @@ KiRL/
 │   ├── algo/                   # Algorithm configs (grpo.yaml, …)
 │   ├── dataset/                # Dataset configs
 │   ├── engine/                 # Engine configs (fsdp.yaml, ddp.yaml)
+│   ├── optimizer/              # Optimizer placement (native, hybrid)
 │   ├── rollout/                # Rollout configs (vllm.yaml)
 │   └── train.yaml              # Main training config (defaults list)
 ├── examples/                    # Example training scripts
@@ -85,24 +87,21 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install transformers datasets hydra-core wandb
 ```
 
-### Training Example
+### Validate a GRPO Configuration
 
 ```bash
-# Single GPU training
-python examples/train_grpo_gsm8k.py
-
-# Multi-GPU training with torchrun
-torchrun --nproc_per_node=2 examples/train_grpo_gsm8k.py
-
-# Modify config via command line
-python examples/train_grpo_gsm8k.py algo=ppo dataset=math
+uv run python -m examples.train_grpo_gsm8k engine=fsdp optimizer=hybrid engine.optimizer=adamw
 ```
+
+This entry point writes `resolved_config.yaml`. To run training, construct a `GRPOTrainer` with a dataset, reward function and generation backend, then call `train()`.
 
 ## Architecture Highlights
 
+Hugging Face Trainer and Accelerate drive gradient accumulation and optimizer steps. KiRL collects rollouts inside `GRPOTrainer.compute_loss()`, computes rewards and the policy loss, and synchronizes weights to the embedded rollout backend after a successful update. Multi-node placement and policy-version scheduling are future work.
+
 ### Configuration Layer
 
-`resolve_train_config` is the boundary between Hydra and the training pipeline. It merges `TrainSchema` over the user's YAML, resolves all `${...}` interpolations, runs semantic validation (numeric bounds, cross-field constraints, enum whitelists from `registry.yaml`), resolves relative paths, and constructs three strongly-typed objects — `training_args`, `GenerationConfig`, `VLLMBackendConfig` — that the pipeline can trust without further checking.
+`resolve_train_config` validates Hydra settings and prepares Trainer arguments, generation settings and the vLLM configuration. With `optimizer=hybrid`, it also returns `optimizer_cls_and_kwargs` for the trainer. See the [Hydra field guide](docs/hydra_config.md).
 
 ### Profiler
 
@@ -131,7 +130,7 @@ ProfilerSettings (Hydra adapter)
 
 ### Inference
 
-`vLLMEngine` runs in two modes: embedded (`from_config` → `LLM(...)`) or server (`start_client` launches `vllm.entrypoints.openai.api_server` as a subprocess and connects an OpenAI-compatible client). `generate()` returns `list[GenerationOutput]` with per-token logprobs, consumed directly by the GRPO rollout loop. `update_weight()` syncs updated policy weights into the running engine without reloading.
+`vLLMEngine` runs in two modes: embedded (`from_config` → `LLM(...)`) or server (`start_client` launches `vllm.entrypoints.openai.api_server` as a subprocess and connects an OpenAI-compatible client). `generate()` returns `list[GenerationOutput]` with per-token logprobs, consumed directly by the GRPO rollout loop. `update_weight()` loads updated policy weights into the embedded engine.
 
 ### Algorithm Loss Kernels
 
@@ -227,11 +226,11 @@ reward:  [gsm8k_reward, math_reward, external_model]
 | Loss kernels (`core_algo.py`) | ✅ Complete |
 | `math_accuracy_reward` | ✅ Complete |
 | GSM8K dataset (raw text loader) | 🟡 Partial — tokenization / collate_fn missing |
-| `GRPOTrainer` | 🟡 Scaffold — `compute_loss` / rollout loop not wired |
+| `GRPOTrainer` | Online rollout, policy loss and post-update weight sync implemented |
 | `SFTTrainer` | 🟡 In progress |
 | Training loop (`pipeline/train.py`) | 🔴 Stub |
 | `gsm8k_reward` | 🔴 Missing |
-| Checkpoint management | 🔴 Stub |
+| Checkpoint management | Trainer integration and RL metadata |
 | MATH dataset | 🔴 Stub |
 | PPO / DPO trainers | 🔴 Stub |
 

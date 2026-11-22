@@ -2,38 +2,29 @@
 
 ## Project Setup
 
-- [ ] Initialize project structure
-  ```
-  KiRL/
-  ├── kirl/
-  │   ├── algorithms/         # Algorithm module
-  │   ├── datasets/           # Dataset module
-  │   ├── engine/             # Engine core
-  │   ├── pipeline/           # Training/inference pipeline
-  │   ├── distributed/        # Distributed utilities
-  │   └── utils/              # Logging, config, helpers
-  ├── configs/                # Hydra configs
-  ├── examples/               # Example training scripts
-  ├── tests/                  # Unit tests
-  ├── ARCHITECTURE.md
-  ├── TODO.md
-  └── README.md
-  ```
+- [x] Initialize the package, dependencies and structured Hydra configuration. See the [configuration guide](docs/hydra_config.md).
 
-- [ ] Set up package dependencies
-  - PyTorch >= 2.0
-  - Hydra-core
-  - transformers
-  - datasets (HuggingFace)
-  - wandb (optional logging)
+## Next milestones
 
-- [ ] Configure Hydra config structure
-  - `configs/algo/grpo.yaml`, `configs/algo/ppo.yaml`
-  - `configs/dataset/gsm8k.yaml`, `configs/dataset/math.yaml`
-  - `configs/engine/fsdp.yaml`, `configs/engine/ddp.yaml`
-  - `configs/train.yaml` (main config)
+### 1. Thin multi-GPU runtime and profiling
 
----
+- [ ] Let GRPO consume a fixed rollout batch while preserving its existing Trainer entry point. Define collect, update and publish boundaries.
+- [ ] Describe the training group and rollout replicas independently: device IDs, placement and tensor-parallel size. Keep gradient collectives inside the training backend.
+- [ ] Tag trajectories with policy version and group ID. Publish only after a successful update and wait for all ranks of each serving replica to acknowledge the new version. Verify two consecutive rounds and an overflow skip.
+- [ ] Add a reproducible launcher and profile rollout, update, weight publication and queue wait. Compare two-card colocation with four-card separation using the same two training ranks, two TP=1 replicas and token budget. Report critical-path time, peak memory and action tokens per GPU-second.
+- [ ] Validate layout conversion from two training ranks to one TP=2 replica, including same-token logprob checks. Defer cross-node transport and asynchronous scheduling until the synchronous baseline passes.
+
+### 2. On-policy distillation (OPD)
+
+- [ ] Generate a fixed batch with the student. Retain token IDs, action masks, behavior logprobs and policy version; score the same tokens and prefixes with a frozen teacher.
+- [ ] Implement a token-level distillation objective with explicit sampling, masking and normalization semantics. Check teacher/student alignment with identical weights before comparing different models.
+- [ ] Complete one student update and publish it for the next rollout. Measure teacher scoring throughput and queue time separately from generation.
+
+### 3. Agent sandbox and multi-turn rollout
+
+- [ ] Give each episode an isolated CPU environment with reset, step and close operations. Start with a deterministic task, bounded resources, timeouts and cleanup.
+- [ ] Record actions, tool results, termination reasons and environment identity. Deduplicate retried actions and replay a recorded episode without repeating its side effects.
+- [ ] Feed observations back as context and mask them out of action loss. Verify a two-turn trajectory through collection and scoring, and profile tool wait separately from GPU generation.
 
 ## Phase 1: Distributed Context and Engine Core
 
@@ -41,29 +32,7 @@
 
 **File**: `kirl/distributed/context.py`
 
-- [ ] Implement `DistributedContext` class
-  ```python
-  class DistributedContext:
-      rank: int
-      local_rank: int
-      world_size: int
-      device: torch.device
-
-      @classmethod
-      def from_torchrun(cls) -> DistributedContext
-
-      def barrier(self)
-      def all_reduce(self, tensor: torch.Tensor) -> torch.Tensor
-      def all_gather(self, tensor: torch.Tensor) -> list[torch.Tensor]
-      def broadcast(self, tensor: torch.Tensor, src: int) -> torch.Tensor
-      def root_call(self, fn: Callable) -> Any
-      def agree(self, key: str, value: Any)  # Sanity check across ranks
-  ```
-
-- [ ] Add determinism utilities
-  - Separate identical model initialization seeds from rank-specific training/sampling seeds
-  - Establish CUDA determinism settings before the relevant runtime is initialized
-  - Configure Python hash seeding before interpreter startup when required
+- [x] Implement DistributedContext collectives and deterministic seeding.
 
 - [ ] Define process-group ownership, initialization validation, timeout policy, and cleanup on exit
 - [ ] Distinguish rank-0-only local work from operations requiring collective participation
@@ -112,7 +81,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 - [ ] Establish a minimal single-node topology; defer hybrid and multi-dimensional meshes
 - [ ] Select Transformer blocks explicitly and report when no supported blocks are found
 - [ ] Preserve shared/tied parameter ownership when selecting wrapping boundaries
-- [ ] Support FSDP1 wrapping and FSDP2 child-before-parent sharding through the same preparation boundary
+- [x] Support FSDP1 wrapping and FSDP2 child-before-parent sharding through the same preparation boundary
 - [ ] Guarantee consistent initial parameters and buffers across ranks
   - Separate identical model initialization from rank-specific training randomness
   - Define consistency requirements for random initialization and pretrained loading
@@ -162,7 +131,8 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
   - Handle incomplete accumulation windows and unequal effective token counts
   - Require compatible collective schedules across ranks
   - Establish correctness with normal synchronization before adding deferred-sync optimization
-- [ ] Implement the optimizer update lifecycle
+- [x] Implement synchronous hybrid optimizer placement with interchangeable inner optimizers.
+- [ ] Verify the distributed optimizer update lifecycle
   - Undo scaling before clipping when FP16 scaling is enabled
   - Delegate global clipping to the backend
   - Ensure all ranks agree whether an update proceeds or is skipped for non-finite gradients
@@ -224,16 +194,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 **File**: `kirl/algorithms/base.py`
 
-- [ ] Define `RolloutData` dataclass
-  ```python
-  @dataclass
-  class RolloutData:
-      rewards: torch.Tensor          # [batch, seq_len]
-      log_probs: torch.Tensor        # [batch, seq_len]
-      values: Optional[torch.Tensor] # [batch, seq_len] for PPO
-      response_mask: torch.Tensor    # [batch, seq_len]
-      old_log_probs: torch.Tensor    # [batch, seq_len]
-  ```
+- [x] Define RolloutData for GRPO rewards, logprobs, masks and optional values.
 
 - [ ] Define `BaseAlgorithm` interface
   ```python
@@ -275,15 +236,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 **File**: `kirl/algorithms/grpo.py`
 
-- [ ] Implement GRPO advantage estimation
-  - Group-based normalization
-  - Handle multiple responses per prompt
-  - Reference: `verl/verl/trainer/ppo/core_algos.py` (GRPO estimator)
-
-- [ ] Implement GRPO loss
-  - Policy gradient with importance weighting
-  - Optional clipping (if `cliprange` provided)
-  - Return metrics: policy_loss, mean_advantages, clipped_fraction
+- [x] Implement group-relative advantages, clipped GRPO loss and rollout integration in GRPOTrainer.
 
 **Testing**:
 - [ ] Verify advantages sum to zero within groups
@@ -298,10 +251,8 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
   - Reference: `verl/verl/trainer/ppo/core_algos.py`
   - Compute advantages using value function and rewards
 
-- [ ] Implement clipped PPO loss
-  - Ratio clipping
-  - Value loss (if critic enabled)
-  - Entropy bonus
+- [x] Implement clipped PPO policy and value loss kernels.
+- [ ] Integrate entropy regularization into PPO training.
 
 **Testing**:
 - [ ] Verify advantage computation with synthetic returns
@@ -311,11 +262,8 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 **File**: `kirl/algorithms/dpo.py`
 
-- [ ] Implement DPO loss (preference-based)
-  - No advantage computation (direct loss on preferred/rejected pairs)
-  - Reference: HuggingFace TRL implementation
-
----
+- [x] Implement the pairwise DPO loss kernel.
+- [ ] Connect preference data and the loss to DPOTrainer.
 
 ## Phase 3: Dataset Module
 
@@ -323,55 +271,15 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 **File**: `kirl/datasets/base.py`
 
-- [ ] Define `BaseDataset` interface
-  ```python
-  class BaseDataset(ABC):
-      name: str = "base"
-
-      @abstractmethod
-      def load_raw_data(self, split: str) -> list[dict]:
-          ...
-
-      @abstractmethod
-      def parse_sample(self, raw_sample: dict) -> dict[str, Any]:
-          ...
-
-      def collate_fn(self, batch: list[dict]) -> dict[str, torch.Tensor]:
-          # Default tokenization + padding
-          ...
-
-      def get_shard(
-          self,
-          data: list[dict],
-          rank: int,
-          world_size: int
-      ) -> list[dict]:
-          # Default: rank-based round-robin
-          indices = list(range(rank, len(data), world_size))
-          # Pad to ensure all ranks have same count
-          count = math.ceil(len(data) / world_size)
-          indices += [0] * (count - len(indices))
-          return [data[i] for i in indices]
-  ```
-
-- [ ] Implement dataset registry
-  ```python
-  DATASET_REGISTRY: dict[str, type[BaseDataset]] = {}
-
-  def register_dataset(name: str):
-      ...
-  ```
+- [x] Implement the map-style BaseDataset and registered dataset factory.
 
 ### 3.2 GSM8K Dataset (Priority: HIGH)
 
 **File**: `kirl/datasets/gsm8k.py`
 
-- [ ] Load GSM8K from HuggingFace or local JSON
-- [ ] Parse format: `{"question": "...", "answer": "..."}`
-- [ ] Implement prompt template loading
-  - Support configurable templates
+- [x] Load local GSM8K JSONL, parse final answers and apply prompt templates.
+- [ ] Add Hugging Face dataset loading.
 
-**Testing**:
 - [ ] Verify data loading on train/test splits
 - [ ] Check sharding: all ranks receive disjoint subsets
 - [ ] Tokenization output shape correctness
@@ -515,23 +423,7 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 **Files**: `configs/*.yaml`
 
-- [ ] Define base config structure
-  ```yaml
-  # configs/train.yaml
-  defaults:
-    - algo: grpo
-    - dataset: gsm8k
-    - engine: fsdp
-
-  num_steps: 1000
-  batch_size: 8
-  gradient_accumulation_steps: 4
-  log_interval: 10
-  eval_interval: 100
-  seed: 42
-  output_dir: ./outputs
-  ```
-
+- [x] Define the structured Hydra configuration and defaults.
 - [ ] Create algorithm configs
   - `configs/algo/grpo.yaml`: `beta`, `temperature`, etc.
   - `configs/algo/ppo.yaml`: `clip_ratio`, `gae_lambda`, etc.
@@ -585,14 +477,10 @@ Start with one backend module. Separate FSDP1/FSDP2 implementations later only i
 
 ### Profiler implementation status (2026-11-03)
 
-- [x] Add validated global, Torch, and vLLM profiler settings with a plain-mapping entry point
-- [x] Add per-process Probe/NullProbe, rank/step sampling, coarse host timings, and trace windows
-- [x] Add a bounded background JSONL sink with drop/error/drain status
-- [x] Add a PyTorch adapter and an injected synchronous vLLM client adapter
-- [x] Add backend-independent metric/stage/artifact records and offline JSON report generation
-- [x] Add local CPU trace and fake-vLLM contract tests; optional OmegaConf integration is dependency-gated
-- [x] Add a CPU-only runnable smoke example and profiler integration guide
-- [ ] Wire probes into the real training and inference pipeline once those modules exist
+- [x] Implement Probe, rank sampling, trace windows, JSONL reporting and Torch/vLLM adapters; cover CPU and fake-backend paths.
+
+- [x] Instrument GRPO microsteps, rollout and weight synchronization.
+- [ ] Drive iteration windows from the end-to-end runtime.
 - [ ] Validate actual CUDA/NCCL FSDP traces and actual vLLM metrics/traces on the target software versions
 - [ ] Measure off/basic/sampled/trace overhead on representative training and inference workloads
 - [ ] Add AsyncLLM/HTTP adapters, cross-node artifact collection, and trace-completion verification
@@ -652,14 +540,14 @@ Local CPU tests and fake engine calls do not establish GPU correctness, real vLL
 
 **File**: `README.md`
 
-- [ ] Project overview and design goals
+- [x] Document project goals and module layout.
 - [ ] Installation instructions
 - [ ] Quick start example
   ```bash
   torchrun --nproc_per_node=2 examples/train_grpo_gsm8k.py
   ```
 - [ ] Configuration guide (how to add new algo/dataset)
-- [ ] Architecture reference (link to ARCHITECTURE.md)
+- [x] Link the architecture reference.
 
 ### 7.2 Example Scripts (Priority: MEDIUM)
 
