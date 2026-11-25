@@ -25,7 +25,10 @@ class FSDPBackend:
         self.probe = probe if probe is not None else NullProbe()
 
 
-    def prepare_mode(self, model: torch.nn.Module, transformer_layer_cls):
+    def prepare_mode(
+        self, model: torch.nn.Module, transformer_layer_cls, *,
+        activation_checkpointing: bool = False, activation_offload: bool = False,
+    ):
         self._validate_model(model, transformer_layer_cls)
         with self.probe.stage("fsdp.wrap"):
             if self.config.mode == "FSDP":
@@ -35,12 +38,16 @@ class FSDPBackend:
                     extra={"event": "fsdp.wrap.start", "phase": "init"},
                 )
                 model = self._prepare_fsdp1(model, transformer_layer_cls)
+                if activation_checkpointing:
+                    self._checkpoint_layers(model, transformer_layer_cls, activation_offload)
             else:
                 logger.info(
                     "Wrapping model with FSDP2 reshard_after_forward=%s",
                     self.config.reshard_after_forward,
                     extra={"event": "fsdp.wrap.start", "phase": "init"},
                 )
+                if activation_checkpointing:
+                    self._checkpoint_layers(model, transformer_layer_cls, activation_offload)
                 model = self._prepare_fsdp2(model, transformer_layer_cls)
             logger.info(
                 "Model wrapped successfully",
@@ -48,6 +55,21 @@ class FSDPBackend:
             )
         return model
 
+    @staticmethod
+    def _checkpoint_layers(model, transformer_layer_cls, activation_offload):
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            apply_activation_checkpointing, checkpoint_wrapper, offload_wrapper,
+        )
+
+        def wrap_layer(layer):
+            wrapped = checkpoint_wrapper(layer)
+            return offload_wrapper(wrapped) if activation_offload else wrapped
+
+        layer_types = tuple(transformer_layer_cls)
+        apply_activation_checkpointing(
+            model, checkpoint_wrapper_fn=wrap_layer,
+            check_fn=lambda layer: isinstance(layer, layer_types),
+        )
 
     def _validate_model(self, model, transformer_layer_cls) -> None:
         if not isinstance(model,torch.nn.Module):
@@ -180,7 +202,7 @@ class FSDPBackend:
                     tensor.data = tensor.contiguous()
                 dist.broadcast(tensor, src=0)
         mesh = init_device_mesh(
-            "cuda",
+            self.context.device.type,
             (self.context.world_size,),
             mesh_dim_names=("fsdp",)
         )
