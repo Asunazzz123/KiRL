@@ -87,6 +87,35 @@ def test_skipped_update_does_not_export():
     assert RolloutWeightSyncCallback(trainer).on_step_end(None, None, control) is control
 
 
+def test_rollout_export_reuses_binding_and_reads_current_parameters():
+    unwrapped = []
+
+    def unwrap(model, *, keep_torch_compile):
+        assert not keep_torch_compile
+        unwrapped.append(model)
+        return model
+
+    model = torch.nn.Linear(1, 1)
+    trainer = SimpleNamespace(
+        accelerator=SimpleNamespace(unwrap_model=unwrap),
+        is_deepspeed_enabled=False,
+        is_fsdp_enabled=False,
+        model_wrapped=model,
+        _rollout_policy=None,
+    )
+    trainer._bind_rollout_policy = lambda: _BaseTrainer._bind_rollout_policy(trainer)
+    RolloutWeightSyncCallback(trainer).on_train_begin(None, None, None)
+    assert torch.equal(dict(_BaseTrainer._iter_policy_params(trainer))["weight"], model.weight)
+    model.weight = torch.nn.Parameter(torch.ones_like(model.weight))
+    assert torch.equal(dict(_BaseTrainer._iter_policy_params(trainer))["weight"], model.weight)
+    assert unwrapped == [model]
+
+    replacement = torch.nn.Linear(1, 1)
+    trainer.model_wrapped = replacement
+    assert torch.equal(dict(_BaseTrainer._iter_policy_params(trainer))["weight"], replacement.weight)
+    assert unwrapped == [model, replacement]
+
+
 def test_unprepared_reference_fails_before_rollout():
     trainer = SimpleNamespace(
         algo_config={"beta": 0.1}, reference_model=None, _reference_prepared=False,

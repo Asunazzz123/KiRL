@@ -9,6 +9,7 @@ from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizer
 from .core_algo import compute_grpo_policy_loss
 from .base import _BaseTrainer, RewardFunc, RolloutData, RolloutWeightSyncCallback, ReferencePolicyCallback
 from ..engine.inference.base import GenerationBackend, GenerationConfig
+from ..distributed.fsdp_config import FSDPConfig
 from ..datasets import BaseDataset, RLDataCollator
 from ..utils.logging import Log
 from ..profiler.probe import NullProbe, Probe
@@ -46,7 +47,8 @@ class GRPOTrainer(_BaseTrainer):
         tokenizer_init_kwargs: Mapping[str, Any] | None = None,
         processing_class: PreTrainedTokenizerBase | None = None,
         optimizer_cls_and_kwargs=None,
-        data_collator=None
+        data_collator=None,
+        fsdp_backend_config: FSDPConfig | None = None,
     ):
         args = self._validate_config(args, algo_config, generation_config)
         self.algo_config = {**self._ALGO_DEFAULTS, **(algo_config if algo_config is not None else {})}
@@ -78,7 +80,8 @@ class GRPOTrainer(_BaseTrainer):
             processing_class=tokenizer,
             data_collator=data_collator,
             **({"optimizer_cls_and_kwargs": optimizer_cls_and_kwargs} if optimizer_cls_and_kwargs else {}),
-            probe=probe
+            probe=probe,
+            fsdp_backend_config=fsdp_backend_config,
         )
         if self.algo_config["beta"] > 0:
             self._create_reference_policy()

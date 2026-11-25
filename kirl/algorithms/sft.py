@@ -8,6 +8,7 @@ from transformers import PreTrainedModel, TrainingArguments, PreTrainedTokenizer
 
 from .base import _BaseTrainer
 from ..datasets import BaseDataset
+from ..distributed.fsdp_config import FSDPConfig
 from ..utils.logging import Log
 from ..profiler.probe import Probe, NullProbe
 
@@ -38,6 +39,7 @@ class SFTTrainer(_BaseTrainer):
         processing_class: PreTrainedTokenizerBase | None = None,
         optimizer_cls_and_kwargs=None,
         data_collator=None,
+        fsdp_backend_config: FSDPConfig | None = None,
     ) -> None:
         args = self._validate_config(args, algo_config)
         self.algo_config = {**self._ALGO_DEFAULTS, **(algo_config or {})}
@@ -68,7 +70,8 @@ class SFTTrainer(_BaseTrainer):
             processing_class=tokenizer,
             data_collator=data_collator,
             **({"optimizer_cls_and_kwargs": optimizer_cls_and_kwargs} if optimizer_cls_and_kwargs else {}),
-            probe=probe
+            probe=probe,
+            fsdp_backend_config=fsdp_backend_config,
         )
 
     @classmethod

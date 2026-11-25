@@ -18,6 +18,9 @@ from transformers import (
 from ..utils.logging import Log
 from ..datasets import BaseDataset
 from ..profiler import NullProbe, Probe
+from ..distributed.context import DistributedContext
+from ..distributed.fsdp_backend import FSDPBackend
+from ..distributed.fsdp_config import FSDPConfig
 from ..distributed.ref_policy import create_reference_policy, prepare_reference_policy
 
 RewardFunc: TypeAlias = Callable[..., "list[float | None]"]
@@ -76,6 +79,10 @@ class RolloutWeightSyncCallback(TrainerCallback):
     def __init__(self,trainer:_BaseTrainer):
         self.trainer = trainer
 
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.trainer._bind_rollout_policy()
+        return control
+
     def on_step_end(self, args, state, control, **kwargs):
         if self.trainer.accelerator.optimizer_step_was_skipped:
             return control
@@ -125,6 +132,7 @@ class _BaseTrainer(Trainer):
             *args: Any,
             run_id: str | None = None,
             probe: Probe | NullProbe | None = None,
+            fsdp_backend_config: FSDPConfig | None = None,
             **kwargs: Any
         ) -> None:
         # Allocate before Trainer initialization so subclass hooks can use it.
@@ -137,7 +145,15 @@ class _BaseTrainer(Trainer):
             probe if probe is not None else NullProbe()
         )
         self._evaluating = False
+        self._fsdp_backend_config = fsdp_backend_config
+        self._fsdp_policy = None
+        self._rollout_policy = None
         super().__init__(*args, **kwargs)
+        if fsdp_backend_config is not None:
+            if not self.is_fsdp_enabled:
+                raise ValueError("KiRL FSDP requires FSDP to be enabled in TrainingArguments.")
+            if not hasattr(Trainer, "_prepare_for_training"):
+                raise RuntimeError("KiRL FSDP requires a Trainer with the _prepare_for_training hook.")
         # A supplied Probe remains owned/closed by the caller. Reuse its run ID
         # without installing another handler or generating another experiment ID.
         probe_context = getattr(probe, "logging_context", {})
@@ -154,6 +170,56 @@ class _BaseTrainer(Trainer):
         # Reference Model
         self.reference_model: torch.nn.Module | None = None
         self._reference_prepared = False
+
+    def _prepare_for_training(self, max_steps, train_dataloader, resume_from_checkpoint):
+        config = self._fsdp_backend_config
+        if config is None:
+            return super()._prepare_for_training(max_steps, train_dataloader, resume_from_checkpoint)
+
+        accelerator = self.accelerator
+        plugin = accelerator.state.fsdp_plugin
+        if plugin.fsdp_version != (2 if config.mode == "FSDP2" else 1):
+            raise ValueError("KiRL FSDP mode must match TrainingArguments.fsdp_config['version'].")
+        parallelism = getattr(accelerator, "parallelism_config", None)
+        if parallelism is not None and parallelism.dp_shard_size != accelerator.num_processes:
+            raise ValueError("KiRL FSDP requires a sharding group spanning the training ranks.")
+        if plugin.cpu_ram_efficient_loading or getattr(self, "is_distributed_loading_by_transformers", False):
+            raise ValueError("KiRL FSDP requires a fully loaded policy on each rank before wrapping.")
+
+        activation_checkpointing = plugin.activation_checkpointing
+        if self._fsdp_policy is not self.model:
+            if self.optimizer is not None:
+                raise ValueError("KiRL FSDP must prepare the policy before optimizer creation.")
+            layer_names = plugin.transformer_cls_names_to_wrap or getattr(self.model, "_no_split_modules", None)
+            if not layer_names:
+                raise ValueError("Set transformer_layer_cls_to_wrap for KiRL FSDP.")
+            layer_types = {type(layer) for layer in self.model.modules() if type(layer).__name__ in layer_names}
+            context = DistributedContext(
+                rank=accelerator.process_index,
+                local_rank=accelerator.local_process_index,
+                world_size=accelerator.num_processes,
+                device=accelerator.device,
+            )
+            backend = FSDPBackend(config, context, self._probe)
+            self.model = self.model_wrapped = backend.prepare_mode(
+                self.model, layer_types,
+                activation_checkpointing=activation_checkpointing,
+                activation_offload=getattr(plugin, "activation_checkpointing_offload", False),
+            )
+            self._fsdp_policy = self.model
+
+        # The model is already sharded and checkpoint wrappers are installed.
+        # Let Trainer register the policy and prepare optimizer/checkpoint state.
+        auto_wrap_policy = plugin.auto_wrap_policy
+        plugin.auto_wrap_policy = None
+        plugin.activation_checkpointing = False
+        try:
+            prepared = super()._prepare_for_training(max_steps, train_dataloader, resume_from_checkpoint)
+        finally:
+            plugin.auto_wrap_policy = auto_wrap_policy
+            plugin.activation_checkpointing = activation_checkpointing
+        self._fsdp_policy = self.model
+        return prepared
 
 
     def _telemetry(self) -> dict[str, Any]:
@@ -213,21 +279,32 @@ class _BaseTrainer(Trainer):
         with closing(self._iter_policy_params()) as params:
             yield params
 
+    def _bind_rollout_policy(self):
+        wrapped = self.model_wrapped
+        model = wrapped
+        if self.is_deepspeed_enabled:
+            model = wrapped.module
+        elif not self.is_fsdp_enabled or self.accelerator.state.fsdp_plugin.fsdp_version == 2:
+            model = self.accelerator.unwrap_model(wrapped, keep_torch_compile=False)
+        self._rollout_policy = (wrapped, model)
+
     def _iter_policy_params(self):
         """Yield full policy parameters; use _policy_params_for_rollout to consume.
 
         FSDP1 gathering retains the wrapped root. FSDP2 gathers DTensors one
         parameter at a time. ZeRO-3 gathers each parameter during consumption.
         """
+        if self._rollout_policy is None or self._rollout_policy[0] is not self.model_wrapped:
+            self._bind_rollout_policy()
+        _, model = self._rollout_policy
+
         if self.is_deepspeed_enabled:
             from deepspeed import zero
 
-            engine = self.model_wrapped
-            for name, parameter in engine.module.named_parameters():
+            for name, parameter in model.named_parameters():
                 with zero.GatheredParameters(parameter, enabled=hasattr(parameter, "ds_id")):
                     yield name, parameter.detach()
             return
-        model = self.model_wrapped
         if self.is_fsdp_enabled:
             version = self.accelerator.state.fsdp_plugin.fsdp_version
             if version == 1:
@@ -239,21 +316,19 @@ class _BaseTrainer(Trainer):
                 with FSDP.summon_full_params(model, writeback=False, rank0_only=False):
                     # FSDP cleans nested wrapper names inside this context.
                     for name, parameter in model.named_parameters():
-                        yield name, parameter.detach()
+                        yield name.replace("_checkpoint_wrapped_module.", ""), parameter.detach()
                 return
             if version != 2:
                 raise NotImplementedError(f"Unsupported FSDP version: {version}")
             from torch.distributed.tensor import DTensor
 
-            model = self.accelerator.unwrap_model(model, keep_torch_compile=False)
             for name, parameter in model.named_parameters():
                 tensor = parameter.detach()
                 if isinstance(tensor, DTensor):
                     tensor = tensor.full_tensor()
-                yield name, tensor
+                yield name.replace("_checkpoint_wrapped_module.", ""), tensor
             return
 
-        model = self.accelerator.unwrap_model(model, keep_torch_compile=False)
         for name, parameter in model.named_parameters():
             yield name, parameter.detach()
 
